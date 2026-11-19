@@ -17,6 +17,11 @@ export async function createEnvironment(vars: Record<string, string | undefined>
   validateOutboundProxyUrl(vars.OUTBOUND_PROXY_URL);
   photoProvider(vars);
   batchEnabled(vars);
+  const rawPhotoWorkers = vars.PHOTO_WORKERS ?? "1";
+  const photoWorkers = Number(rawPhotoWorkers);
+  if (!/^\d+$/.test(rawPhotoWorkers) || !Number.isSafeInteger(photoWorkers) || photoWorkers < 1) {
+    throw new Error("PHOTO_WORKERS must be a positive integer");
+  }
   const telegramMode = vars.TELEGRAM_MODE ?? "polling";
   if (telegramMode !== "polling" && telegramMode !== "webhook") throw new Error("TELEGRAM_MODE must be polling or webhook");
   for (const key of ["PUBLIC_URL", "BOT_TOKEN", "ENCRYPTION_KEY", "WORKER_SECRET", "ADMIN_ID", ...(telegramMode === "webhook" ? ["WEBHOOK_SECRET", "TG_CLIENT_SECRET"] : [])]) {
@@ -39,7 +44,7 @@ export async function createEnvironment(vars: Record<string, string | undefined>
     DB: db, OAUTH_KV: createKV(db), MEDIA: storage,
     VECTORS: createVectors(db), LIVE: new LiveHub(),
   } as unknown as Env;
-  const queues = new LocalQueues(db.sqlite, async batch => { await worker.queue(batch as MessageBatch<import("../queue").Job>, env); });
+  const queues = new LocalQueues(db.sqlite, async batch => { await worker.queue(batch as MessageBatch<import("../queue").Job>, env); }, undefined, undefined, photoWorkers);
   const jobs = createJobDispatcher(db, env);
   Object.assign(env, {
     JOBS: queues.binding("memesave-jobs"), UPLOADS: queues.binding("memesave-tgupload"),

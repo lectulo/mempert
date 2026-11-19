@@ -27,16 +27,19 @@ async function fileHash(env: Env, m: Meme): Promise<string> {
   }
 }
 
-/** Saves the hash; true when the user already has a meme with the same bytes (then this one is removed). */
+/** Saves the hash; true if embedding should stop because the meme was removed or is a duplicate. */
 async function dedupe(env: Env, m: Meme): Promise<boolean> {
   const sha256 = await fileHash(env, m);
-  const other = sha256
-    ? await env.DB.prepare("SELECT id FROM memes WHERE user_id = ? AND sha256 = ? AND id != ?").bind(m.user_id, sha256, m.id).first<string>("id")
-    : null;
-  if (!other) {
+  if (!sha256) {
     await env.DB.prepare("UPDATE memes SET sha256 = ? WHERE id = ?").bind(sha256, m.id).run();
     return false;
   }
+  // Claim under the same write as the lookup: concurrent embeds cannot both find the hash free.
+  const { meta } = await env.DB.prepare(`UPDATE memes SET sha256 = ?1 WHERE id = ?2 AND NOT EXISTS (
+    SELECT 1 FROM memes WHERE user_id = ?3 AND sha256 = ?1 AND id != ?2
+  )`).bind(sha256, m.id, m.user_id).run();
+  if (meta.changes) return false;
+  if (!(await getMeme(env.DB, m.id))) return true; // removed while hashing, not a duplicate
   await deleteMeme(env, m.id);
   await editStatus(env, m, t(await userLang(env.DB, m.user_id), "already_saved"));
   return true;
