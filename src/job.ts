@@ -1,72 +1,49 @@
-import { Container, type StopParams } from "@cloudflare/containers";
+/** Local replacement for named one-shot container bindings. */
+export interface JobStub {
+  run(id: string, envVars: Record<string, string>): Promise<void>;
+  purge(): Promise<number>;
+}
+export interface JobNamespace {
+  idFromName(name: string): string;
+  get(id: string): JobStub;
+}
+
 import type { Env } from "./env";
+import type { LocalDatabase } from "./runtime/db";
+import type { Job } from "./queue";
 
-const EXIT_RESTART = 75; // container/main.go exits with it on SIGTERM
-const MAX_RESTARTS = 3;
+/** Local-only durable continuations; network work is deliberately outside SQLite transactions. */
+export function jobDatabase(env: Env) {
+  const sqlite = (env.DB as unknown as LocalDatabase).sqlite;
+  if (!sqlite) return undefined;
+  sqlite.exec(`CREATE TABLE IF NOT EXISTS worker_continuations (id TEXT PRIMARY KEY, body TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS worker_continuations_sent (id TEXT PRIMARY KEY);
+    CREATE TABLE IF NOT EXISTS zip_pending_items (zip_id TEXT PRIMARY KEY, body TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS zip_item_members (zip_id TEXT NOT NULL, meme_id TEXT NOT NULL, PRIMARY KEY(zip_id,meme_id));`);
+  return sqlite;
+}
 
-/**
- * One-shot job container: runs one job and exits. `sleepAfter` is the hard timeout. A platform rollout
- * stops the container with SIGTERM: then the job starts again from the beginning on the new image.
- */
-export abstract class JobContainer extends Container<Env> {
-  sleepAfter = "4h";
-  enableInternet = true;
-  /** Storage key of the job id. */
-  protected abstract key: string;
-  protected abstract fail: (id: string, error: string) => Promise<void>;
+export async function continueJob(env: Env, id: string, body: Job) {
+  const db = jobDatabase(env);
+  if (!db) { await env.JOBS.send(body); return; }
+  if (db.query("SELECT 1 FROM worker_continuations_sent WHERE id = ?").get(id)) return;
+  db.query("INSERT OR IGNORE INTO worker_continuations VALUES (?, ?)").run(id, JSON.stringify(body));
+}
 
-  async run(id: string, envVars: Record<string, string>) {
-    await this.ctx.storage.put({ [this.key]: id, envVars, restarts: 0 });
-    await this.start({ envVars, enableInternet: true });
-  }
-
-  override async onActivityExpired() {
-    await this.ctx.storage.put("timedOut", true);
-    await super.onActivityExpired();
-  }
-
-  override async onStop({ exitCode }: StopParams) {
-    await this.restartOrFail(exitCode === EXIT_RESTART, `container stopped, exit code ${exitCode}`);
-  }
-
-  /** The library calls only this, not onStop, when the container is lost without an exit code (for example in a rollout). */
-  override async onError(error: unknown) {
-    console.error("Container error:", error);
-    await this.restartOrFail(true, `container error: ${error}`);
-  }
-
-  private async restartOrFail(restart: boolean, error: string) {
-    const s = await this.ctx.storage.get<any>([this.key, "restarts", "timedOut"]);
-    const id: string | undefined = s.get(this.key);
-    const restarts: number = s.get("restarts") ?? MAX_RESTARTS;
-    if (!id) return;
-    if (restart && !s.get("timedOut") && restarts < MAX_RESTARTS) {
-      await this.ctx.storage.put("restarts", restarts + 1);
-      await this.schedule(1, "restart");
-      return;
-    }
-    // No-op when the container already reported done or fail.
-    await this.fail(id, error);
-    await this.ctx.storage.put("finished", true);
-  }
-
-  /** The library writes its state after onStop, so the finished job's storage is deleted only after its alarm. */
-  override async alarm(props?: AlarmInvocationInfo) {
-    await super.alarm(props);
-    if (!this.ctx.container?.running && (await this.ctx.storage.get("finished"))) await this.ctx.storage.deleteAll();
-  }
-
-  /** Deletes the storage of a job that finished before the cleanup in alarm; returns the number of deleted keys. */
-  async purge() {
-    if (this.ctx.container?.running) return -1;
-    const n = (await this.ctx.storage.list()).size;
-    await this.ctx.storage.deleteAlarm();
-    await this.ctx.storage.deleteAll();
-    return n;
-  }
-
-  async restart() {
-    const envVars = await this.ctx.storage.get<Record<string, string>>("envVars");
-    await this.start({ envVars, enableInternet: true }).catch((e) => this.restartOrFail(true, `restart: ${e}`));
+export async function flushJobContinuations(env: Env) {
+  const db = jobDatabase(env);
+  if (!db) return;
+  for (const row of db.query<{ id: string; body: string }, []>("SELECT * FROM worker_continuations").all()) {
+    const body = JSON.parse(row.body) as Job;
+    if (row.id.startsWith("analysis:") && !db.query("SELECT 1 FROM analyses WHERE id = ? AND status = 'done'").get(row.id.split(":")[1])) continue;
+    if (row.id.endsWith(":batch") && !db.query("SELECT 1 FROM zip_imports WHERE id = ? AND status IN ('done','failed')").get(row.id.split(":")[1])) continue;
+    await env.JOBS.send(body);
+    db.transaction(() => {
+      db.query("INSERT OR IGNORE INTO worker_continuations_sent VALUES (?)").run(row.id);
+      db.query("DELETE FROM worker_continuations WHERE id = ?").run(row.id);
+    })();
   }
 }
+
+/** Notifications are best-effort after durable completion, never part of worker success. */
+export function notifyJob(work: () => Promise<unknown>) { void work().catch(console.error); }

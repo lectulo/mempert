@@ -22,7 +22,7 @@ function setup(llmReply = '{"clusters":[{"id":0,"name":"Cats","summary":"Cats at
     if (url.includes("openrouter.ai")) return Response.json({ choices: [{ message: { content: llmReply } }], usage: { cost: 0.001 } });
     return Response.json({ ok: true, result: { message_id: 7 } });
   });
-  const e = { ...env, PUBLIC_URL: "https://m.example", ANALYZE, VECTORS, JOBS } as unknown as Env;
+  const e = { ...env, PUBLIC_URL: "https://m.example", INTERNAL_URL: "http://app:3000", ANALYZE, VECTORS, JOBS } as unknown as Env;
   return { e, started, jobs, calls };
 }
 
@@ -152,7 +152,7 @@ describe("embedding analysis", () => {
     const { e, started } = setup();
     const first = await startAnalysis(e, 70, { llm: false });
     expect(first?.status).toBe("running");
-    expect(started[0]).toMatchObject({ MODE: "analyze", API_URL: `https://m.example/analysis/${first!.id}` });
+    expect(started[0]).toMatchObject({ MODE: "analyze", API_URL: `${e.INTERNAL_URL}/analysis/${first!.id}` });
     const again = await startAnalysis(e, 70, { llm: true, chat: true, msgId: 5 });
     expect(again?.id).toBe(first!.id);
     expect(started).toHaveLength(1);

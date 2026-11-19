@@ -1,13 +1,23 @@
-import { Container } from "@cloudflare/containers";
 import { getMeme } from "./db";
 import type { Env } from "./env";
 import { previewKey } from "./media";
 
-/** ffmpeg service (thumb/): one instance per user, so a bad file cannot affect other users; it stops after 1 idle minute. */
-export class Thumbnailer extends Container<Env> {
-  defaultPort = 8080;
-  sleepAfter = "1m";
+/** Private Compose service; requests use isolated temporary directories. */
+export function createThumbnailNamespace(env: Pick<Env, "THUMB_URL">) {
+  const base = env.THUMB_URL || "http://thumb:8080";
+  return {
+    idFromName: (name: string) => name,
+    get: (_id: string) => ({
+      fetch(input: string | Request, init?: RequestInit) {
+        const url = new URL(typeof input === "string" ? input : input.url);
+        const target = new URL(url.pathname + url.search, base);
+        return fetch(typeof input === "string" ? target.toString() : new Request(target.toString(), input), init);
+      },
+    }),
+  };
 }
+
+export type ThumbNamespace = ReturnType<typeof createThumbnailNamespace>;
 
 export interface Thumb {
   jpeg: ArrayBuffer;

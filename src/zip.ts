@@ -7,13 +7,13 @@ import { t, type Key, type Lang } from "./i18n";
 import type { SourceMeta } from "./ingest/describe";
 import { namespace, upsertVectors } from "./ingest/embed";
 import { gallerySource } from "./ingest/gallery";
-import { JobContainer } from "./job";
 import { insertMeme } from "./ingest/receive";
 import { fileKey, previewKey, sign, signedQuery, tmpKey, verify, verifyQuery } from "./media";
 import type { Job } from "./queue";
 import { uploadPage } from "./uploadpage";
 import { editWidget, progressApi, sendWidget } from "./widget";
 import { progressPage } from "./widgetpages";
+import { continueJob, jobDatabase, notifyJob } from "./job";
 
 const LINK_TTL = 86400;
 const blobKey = (userId: number, sha256: string) => `u/${userId}/${sha256}`;
@@ -32,12 +32,6 @@ interface ZipImport {
   status_msg_id: number | null;
   widget_msg_id: number | null;
   format: string | null;
-}
-
-/** Job container: unpacks one export. */
-export class ZipImporter extends JobContainer {
-  protected key = "zipId";
-  protected fail = (id: string, error: string) => failZip(this.env, id, error);
 }
 
 interface ZipItem {
@@ -168,13 +162,13 @@ export const setZipStatusMessage = (db: D1Database, id: string, messageId: numbe
 
 /** Marks a running or uploading zip import failed, deletes the archive and tells the user. */
 /** Submits the archive's photos as a half-price batch (the import row is created only now). */
-async function submitZipPhotos(env: Env, zip: ZipImport) {
+export async function submitZipPhotos(env: Env, zip: ZipImport) {
   const photos = await env.DB.prepare("SELECT 1 FROM memes WHERE import_id = ? LIMIT 1").bind(zip.import_id).first();
   if (!photos) return;
   await env.DB.prepare("INSERT OR IGNORE INTO imports (id, user_id, status, status_msg_id) VALUES (?, ?, 'submitting', ?)")
     .bind(zip.import_id, zip.user_id, zip.status_msg_id)
     .run();
-  await env.JOBS.send({ type: "batch_submit", importId: zip.import_id });
+  await continueJob(env, `zip:${zip.id}:batch`, { type: "batch_submit", importId: zip.import_id });
 }
 
 export async function failZip(env: Env, id: string, error: string) {
@@ -184,10 +178,12 @@ export async function failZip(env: Env, id: string, error: string) {
     .bind(error.slice(0, 1000), id)
     .first<ZipImport>();
   if (!zip) return;
-  await push(env, zip.user_id, { t: "job", kind: "zip" });
-  await env.MEDIA.delete(zipKey(id));
-  await say(env, zip, "zip_failed", { error: error.slice(0, 300).replace(/[<>&]/g, "") }, false);
   await submitZipPhotos(env, zip); // photos saved before the failure still get described
+  notifyJob(async () => {
+    await push(env, zip.user_id, { t: "job", kind: "zip" });
+    await env.MEDIA.delete(zipKey(id));
+    await say(env, zip, "zip_failed", { error: error.slice(0, 300).replace(/[<>&]/g, "") }, false);
+  });
 }
 
 const json = (body: unknown, status = 200) => Response.json(body, { status });
@@ -221,7 +217,7 @@ export async function handleUpload(req: Request, env: Env, ctx: ExecutionContext
     const { parts } = await req.json<{ parts: R2UploadedPart[] }>();
     await upload.complete(parts);
     await env.DB.prepare("UPDATE zip_imports SET status = 'running', updated_at = unixepoch() WHERE id = ?").bind(id).run();
-    const base = `${env.PUBLIC_URL.replace(/\/$/, "")}/zip/${id}`;
+    const base = `${env.INTERNAL_URL.replace(/\/$/, "")}/zip/${id}`;
     const stub = env.ZIP.get(env.ZIP.idFromName(id));
     await stub.run(id, { ZIP_URL: `${base}/file`, API_URL: base, TOKEN: await sign(env, `zip|${id}`) });
     ctx.waitUntil(say(env, zip, "zip_unpacking", {}, true));
@@ -286,6 +282,9 @@ export async function handleZipCallback(req: Request, env: Env): Promise<Respons
       await failZip(env, id, "storage limit reached");
       return json({ error: "storage full" }, 403);
     }
+    // Persist before insert: replay survives insert -> restore/enqueue crashes and filter deduplication.
+    const local = jobDatabase(env);
+    local?.query("INSERT OR REPLACE INTO zip_pending_items VALUES (?, ?)").run(id, JSON.stringify(body));
     // Photos go to the archive's own batch; videos and GIFs use the normal pipeline; exported memes are restored.
     const jobs: { body: Job; delaySeconds?: number }[] = [];
     let restored = 0;
@@ -294,7 +293,7 @@ export async function handleZipCallback(req: Request, env: Env): Promise<Respons
       if (!/^[0-9a-f]{64}$/.test(item.sha256) || !KINDS.includes(item.kind)) continue;
       const link = item.links?.find((l) => typeof l === "string" && gallerySource(l));
       // Imported files live in R2; they get Telegram file ids on their first send ("r2:<sha256>" until then).
-      const memeId = await insertMeme(db, zip.user_id, {
+      let memeId = await insertMeme(db, zip.user_id, {
         kind: item.kind,
         file_id: "",
         file_unique_id: `r2:${item.sha256}`,
@@ -315,23 +314,36 @@ export async function handleZipCallback(req: Request, env: Env): Promise<Respons
         sha256: item.sha256,
         added_via: "zip",
       });
+      if (!memeId && local) {
+        const existing = await db.prepare("SELECT id, status FROM memes WHERE user_id = ? AND sha256 = ? AND added_via = 'zip'").bind(zip.user_id, item.sha256).first<{id: string; status: string}>();
+        if (existing) {
+          local.query("INSERT OR IGNORE INTO zip_item_members VALUES (?, ?)").run(id, existing.id);
+          if (existing.status === "embedding") memeId = existing.id;
+        }
+      }
       if (!memeId) continue;
+      local?.query("INSERT OR IGNORE INTO zip_item_members VALUES (?, ?)").run(id, memeId);
       if (await restoreMeme(env, zip.user_id, memeId, item.kind, item.restore)) restored++;
       // A source link: its metadata first, then the embed (about 1 listing per second over the linked memes of the import).
       else if (link) jobs.push({ body: { type: "source_meta", memeId }, delaySeconds: Math.min(zip.linked + linked++, 43200) });
       else jobs.push({ body: { type: "embed", memeId } });
     }
-    if (jobs.length) await env.JOBS.sendBatch(jobs);
+    for (const job of jobs) await continueJob(env, `zip:${id}:${JSON.stringify(job.body)}`, job.body);
     const done = await db
-      .prepare("UPDATE zip_imports SET imported = imported + ?, linked = linked + ?, updated_at = unixepoch() WHERE id = ? RETURNING imported")
-      .bind(jobs.length + restored, linked, id)
+      .prepare(local
+        ? "UPDATE zip_imports SET imported = (SELECT count(*) FROM zip_item_members WHERE zip_id = ?), linked = linked + ?, updated_at = unixepoch() WHERE id = ? RETURNING imported"
+        : "UPDATE zip_imports SET imported = imported + ?, linked = linked + ?, updated_at = unixepoch() WHERE id = ? RETURNING imported")
+      .bind(local ? id : jobs.length + restored, linked, id)
       .first<number>("imported");
-    await progress(env, zip, { found: (zip.total ?? 0) + zip.skipped, total: zip.total ?? 0, skipped: zip.skipped, done: done ?? 0 });
+    local?.query("DELETE FROM zip_pending_items WHERE zip_id = ?").run(id);
+    notifyJob(() => progress(env, zip, { found: (zip.total ?? 0) + zip.skipped, total: zip.total ?? 0, skipped: zip.skipped, done: done ?? 0 }));
     return json({ ok: true });
   }
 
   if (action === "done") {
+    await submitZipPhotos(env, zip);
     await db.prepare("UPDATE zip_imports SET status = 'done', updated_at = unixepoch() WHERE id = ?").bind(id).run();
+    notifyJob(async () => {
     await push(env, zip.user_id, { t: "job", kind: "zip" });
     await env.MEDIA.delete(zipKey(id));
     if (zip.widget_msg_id) {
@@ -339,7 +351,7 @@ export async function handleZipCallback(req: Request, env: Env): Promise<Respons
       await editWidget(botApi(env.BOT_TOKEN), zip.user_id, zip.widget_msg_id, state).catch(console.error);
     }
     await say(env, zip, "zip_done", { imported: zip.imported, skipped: zip.skipped, failed: Number(body.failed ?? 0) }, false);
-    await submitZipPhotos(env, zip);
+    });
     return json({ ok: true });
   }
 
@@ -348,6 +360,23 @@ export async function handleZipCallback(req: Request, env: Env): Promise<Respons
     return json({ ok: true });
   }
   return json({ error: "not found" }, 404);
+}
+
+/** Targeted recovery of an interrupted /items callback, before the next archive filter. */
+export async function recoverZipItems(env: Env) {
+  const local = jobDatabase(env);
+  if (!local) return;
+  for (const row of local.query<{zip_id: string; body: string}, []>("SELECT * FROM zip_pending_items").all()) {
+    const zip = await getZip(env.DB, row.zip_id);
+    if (zip?.status !== "running") continue;
+    const response = await handleZipCallback(new Request(`${env.INTERNAL_URL}/zip/${row.zip_id}/items`, {
+      method: "POST", headers: { Authorization: `Bearer ${await sign(env, `zip|${row.zip_id}`)}`, "Content-Type": "application/json" }, body: row.body,
+    }), env);
+    if (!response.ok) throw new Error(`ZIP recovery ${response.status}`);
+  }
+  // Also covers death after business terminal status but before its mandatory continuation.
+  const { results } = await env.DB.prepare("SELECT * FROM zip_imports WHERE status IN ('done','failed') AND EXISTS (SELECT 1 FROM memes WHERE import_id = zip_imports.import_id) AND NOT EXISTS (SELECT 1 FROM imports WHERE id = zip_imports.import_id AND status != 'submitting')").all<ZipImport>();
+  for (const zip of results) await submitZipPhotos(env, zip);
 }
 
 /**

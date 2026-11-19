@@ -23,7 +23,7 @@ function setup() {
     telegram.push(String(input).split("/").pop()!);
     return Response.json({ ok: true, result: { message_id: 1 } });
   });
-  const e = { ...env, PUBLIC_URL: "https://m.example", EXPORT, VECTORS, JOBS } as unknown as Env;
+  const e = { ...env, PUBLIC_URL: "https://m.example", INTERNAL_URL: "http://app:3000", EXPORT, VECTORS, JOBS } as unknown as Env;
   return { e, started, upserts, jobs, telegram };
 }
 
@@ -41,7 +41,7 @@ describe("data export", () => {
     const { e, started } = setup();
     const first = await startExport(e, 41);
     expect(first).toHaveProperty("id");
-    expect(started[0]).toMatchObject({ MODE: "export", API_URL: `https://m.example/export/${(first as { id: string }).id}` });
+    expect(started[0]).toMatchObject({ MODE: "export", API_URL: `${e.INTERNAL_URL}/export/${(first as { id: string }).id}` });
     expect(await startExport(e, 41)).toHaveProperty("next_at");
     await e.DB.prepare("UPDATE exports SET status = 'failed' WHERE user_id = 41").run();
     expect(await startExport(e, 41)).toHaveProperty("id");
@@ -98,7 +98,7 @@ describe("data export", () => {
     expect((await call(e, id, "complete", { method: "POST", body: JSON.stringify({ parts: [part] }) })).status).toBe(200);
     expect((await call(e, id, "done", { method: "POST", body: JSON.stringify({ size: 7, files: 1, failed: 0 }) })).status).toBe(200);
     expect(await e.DB.prepare("SELECT status, size, files FROM exports WHERE id = ?").bind(id).first()).toEqual({ status: "done", size: 7, files: 1 });
-    expect(telegram).toContain("sendMessage");
+    await vi.waitFor(() => expect(telegram).toContain("sendMessage"));
 
     const url = await downloadUrl(e, id);
     const res = await handleExport(new Request(url), e);

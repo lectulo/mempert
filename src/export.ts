@@ -4,9 +4,9 @@ import type { Env } from "./env";
 import { push } from "./live";
 import { t, type Key } from "./i18n";
 import { memeVectors } from "./ingest/embed";
-import { JobContainer } from "./job";
-import { memeMedia, sign, signedQuery, tmpKey, variantOf, verify, verifyQuery } from "./media";
+import { mediaResponse, sign, signedQuery, tmpKey, variantOf, verify, verifyQuery } from "./media";
 import { showExport } from "./exportwidget";
+import { notifyJob } from "./job";
 
 const DAY = 86400;
 const LINK_TTL = 7 * DAY; // the bucket deletes "tmp/" after 7 days
@@ -83,12 +83,6 @@ const TABLES: Record<string, { from: string; where: string; cols: string; key?: 
   e621_pools: { from: "e621_pools", where: "user_id = ?", cols: "pool_id" },
 };
 
-/** Job container (same image as the importer, MODE=export): builds one export. */
-export class DataExporter extends JobContainer {
-  protected key = "exportId";
-  protected fail = (id: string, error: string) => failExport(this.env, id, error);
-}
-
 const getExport = (db: D1Database, id: string) => db.prepare("SELECT * FROM exports WHERE id = ?").bind(id).first<Export>();
 const base = (env: Env) => env.PUBLIC_URL.replace(/\/$/, "");
 
@@ -112,7 +106,7 @@ export async function startExport(env: Env, userId: number): Promise<{ id: strin
   const id = crypto.randomUUID().replaceAll("-", "");
   await env.DB.prepare("INSERT INTO exports (id, user_id, status) VALUES (?, ?, 'running')").bind(id, userId).run();
   const stub = env.EXPORT.get(env.EXPORT.idFromName(id));
-  await stub.run(id, { MODE: "export", API_URL: `${base(env)}/export/${id}`, TOKEN: await sign(env, `export|${id}`) });
+  await stub.run(id, { MODE: "export", API_URL: `${env.INTERNAL_URL.replace(/\/$/, "")}/export/${id}`, TOKEN: await sign(env, `export|${id}`) });
   return { id };
 }
 
@@ -142,10 +136,12 @@ export async function failExport(env: Env, id: string, error: string) {
     .bind(error.slice(0, 1000), id)
     .first<Export>();
   if (!ex) return;
+  notifyJob(async () => {
   await push(env, ex.user_id, { t: "job", kind: "export" });
   await showExport(env, ex, { s: 3 });
   if (ex.upload_id) await env.MEDIA.resumeMultipartUpload(exportKey(id), ex.upload_id).abort().catch(console.error);
   await say(env, ex, "export_failed", { error: error.slice(0, 300).replace(/[<>&]/g, "") });
+  });
 }
 
 /** Cron: safety net for exports whose container never reported back. */
@@ -206,8 +202,7 @@ export async function handleExport(req: Request, env: Env): Promise<Response> {
     if (m?.user_id !== ex.user_id || (variant !== "file" && variant !== "preview") || variantOf(m, variant) !== variant) {
       return json({ error: "not found" }, 404);
     }
-    const media = await memeMedia(env, m, variant).catch(() => null);
-    return media ? new Response(media.bytes, { headers: { "Content-Type": media.mime } }) : json({ error: "not found" }, 404);
+    return (await mediaResponse(env, m, variant, req).catch(() => null)) ?? json({ error: "not found" }, 404);
   }
 
   if (action === "post" && req.method === "GET" && (variant === "audio" || variant === "clip")) {
@@ -241,11 +236,13 @@ export async function handleExport(req: Request, env: Env): Promise<Response> {
     await env.DB.prepare("UPDATE exports SET status = 'done', size = ?, files = ?, failed = ?, updated_at = unixepoch() WHERE id = ?")
       .bind(done.size, done.files, done.failed, id)
       .run();
+    notifyJob(async () => {
     await push(env, ex.user_id, { t: "job", kind: "export" });
     const lang = await userLang(env.DB, ex.user_id);
     const button = { text: t(lang, "export_button"), url: await downloadUrl(env, id) };
     await showExport(env, ex, { s: 2, z: Math.round(done.size / 2 ** 20), f: done.files, x: done.failed, u: button.url });
     await say(env, ex, "export_done", { ...done, size: (done.size / 2 ** 20).toFixed(1) }, { reply_markup: { inline_keyboard: [[button]] } });
+    });
     return json({ ok: true });
   }
   if (action === "fail") {

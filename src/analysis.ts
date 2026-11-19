@@ -8,7 +8,6 @@ import { push } from "./live";
 import { parseJson } from "./ingest/describe";
 import { memeVectors } from "./ingest/embed";
 import { failedReport } from "./analysisreport";
-import { JobContainer } from "./job";
 import { updateCard } from "./pairwidget";
 import { analysisDue, showAnalysis, showAnalysisProgress } from "./analysiswidget";
 import { sign, tmpKey, verify } from "./media";
@@ -18,6 +17,7 @@ import { pairFacts, type PairResult } from "./pairfacts";
 import type { Pair } from "./pairs";
 import { pairStats } from "./pairstats";
 import { shareUrl } from "./analysisshare";
+import { continueJob, notifyJob } from "./job";
 
 const PAIR_STAGES = ["vectors", "project", "cluster", "extras", "write"]; // analyze/pair.go
 const DAY = 86400;
@@ -129,13 +129,6 @@ export interface StartOptions {
   msgId?: number; // the bot message to reply to
 }
 
-/** Job container (analyze/): embedding maps, clusters and similarity stats of one user's memes. */
-export class Analyzer extends JobContainer {
-  sleepAfter = "2h";
-  protected key = "analysisId";
-  protected fail = (id: string, error: string) => failAnalysis(this.env, id, error);
-}
-
 const json = (body: unknown, status = 200) => Response.json(body, { status, headers: { "Cache-Control": "no-store" } });
 /** The latest analysis of a user (a number) or of a pair (its id). */
 export const latest = (db: D1Database, of: number | string, where = "1") =>
@@ -230,7 +223,7 @@ async function start(env: Env, of: number | string, userId: number, opts: StartO
 
 /** Starts a container run: the full analysis (of a user or a pair), or only the charts of the stored result (a new DO per run). */
 async function launch(env: Env, id: string, mode: "analyze" | "pair" | "render") {
-  const base = env.PUBLIC_URL.replace(/\/$/, "");
+  const base = env.INTERNAL_URL.replace(/\/$/, "");
   const stub = env.ANALYZE.get(env.ANALYZE.idFromName(mode !== "render" ? id : `${id}:render:${Date.now()}`));
   await stub.run(id, { MODE: mode, API_URL: `${base}/analysis/${id}`, TOKEN: await sign(env, `analysis|${id}`) });
 }
@@ -255,17 +248,19 @@ export async function failAnalysis(env: Env, id: string, error: string) {
   )
     .bind(error.slice(0, 1000), id)
     .first<Analysis>();
+  if (a?.status === "done" && a.chat) await continueJob(env, `analysis:${id}:report`, { type: a.pair_id ? "pair_report" : "analysis_report", analysisId: id });
+  notifyJob(async () => {
   if (a) await pushAnalysis(env, a);
   if (a) await showAnalysis(env, a, a.status === "failed" ? { e: 1 } : { d: 1 });
   if (a?.status === "failed" && a.chat) await failedReport(env, a);
-  if (a?.status === "done" && a.chat) await env.JOBS.send({ type: a.pair_id ? "pair_report" : "analysis_report", analysisId: id });
+  });
 }
 
 const JSON_META = { httpMetadata: { contentType: "application/json" } };
 
 /** Cron: safety net for analyses whose container never reported back. */
 export const expireAnalyses = (db: D1Database) =>
-  db.prepare("UPDATE analyses SET status = CASE stage WHEN 'render' THEN 'done' ELSE 'failed' END, error = 'timeout' WHERE status = 'running' AND updated_at < unixepoch() - 3 * 3600").run();
+  db.prepare("UPDATE analyses SET status = CASE stage WHEN 'render' THEN 'done' ELSE 'failed' END, error = 'timeout' WHERE status = 'running' AND updated_at < unixepoch() - 5 * 3600").run();
 
 /** Container calls /analysis/<id>/<action> (per-analysis token). */
 export async function handleAnalysis(req: Request, env: Env): Promise<Response> {
@@ -334,11 +329,13 @@ export async function handleAnalysis(req: Request, env: Env): Promise<Response> 
     return json({ ok: true });
   }
   if (action === "done" && m === "POST") {
+    if (a.chat) await continueJob(env, `analysis:${id}:report`, { type: a.pair_id ? "pair_report" : "analysis_report", analysisId: id });
     await env.DB.prepare("UPDATE analyses SET status = 'done', stage = 'done', updated_at = unixepoch() WHERE id = ?").bind(id).run();
+    notifyJob(async () => {
     await pushAnalysis(env, a);
-    if (a.chat) await env.JOBS.send({ type: a.pair_id ? "pair_report" : "analysis_report", analysisId: id });
     await showAnalysis(env, a, { d: 1 });
     if (p) await updateCard(env, p); // the new compatibility and title
+    });
     return json({ ok: true });
   }
   if (action === "fail" && m === "POST") {
