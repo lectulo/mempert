@@ -110,6 +110,7 @@ export interface Me {
   describe_tier: "max" | "medium";
   hide_porn: boolean;
   blur_porn: boolean;
+  batch_enabled: boolean;
   key: boolean;
   models: Record<string, string>;
   billing: Billing;

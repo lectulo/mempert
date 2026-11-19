@@ -23,7 +23,7 @@
     ...(me.role === "paid" ? [{ id: "billing", label: s.tabBilling }] : []),
     { id: "stats", label: s.tabStats },
     { id: "settings", label: s.tabSettings },
-    { id: "batch", label: s.tabBatch },
+    ...(me.batch_enabled ? [{ id: "batch", label: s.tabBatch }] : []),
     ...(me.role === "admin" ? [{ id: "admin", label: s.tabAdmin }] : []),
     { id: "about", label: s.tabAbout },
   ]);
@@ -43,6 +43,10 @@
   // Load the data of the visible tab each time it is shown.
   $effect(() => {
     if (!open) return;
+    if (tab === "batch" && !me.batch_enabled) {
+      tab = "stats";
+      return;
+    }
     message = null;
     if (tab === "stats") api.stats().then((v) => (stats = v), () => {});
     if (tab === "batch") api.batch().then((v) => (batch = v), () => {});
@@ -53,7 +57,7 @@
 
   // Export and batch status by server push (live.ts) while their tab is open.
   $effect(() => {
-    if (!open || (tab !== "settings" && tab !== "batch")) return;
+    if (!open || (tab !== "settings" && (tab !== "batch" || !me.batch_enabled))) return;
     return onLive((e) => {
       const kind = e.t === "reconnect" ? null : e.t === "job" ? e.kind : "-";
       if (tab === "settings" && (kind === null || kind === "export")) api.exportStatus().then((v) => (exp = v), () => {});
@@ -74,7 +78,7 @@
   // Provider counters (not in the DB, so no push) while the Batch tab is open and something is running.
   const running = (r: ImportRow) => ["submitting", "submitted", "processing"].includes(r.status) || r.pending > 0;
   $effect(() => {
-    if (!open || tab !== "batch") return;
+    if (!open || tab !== "batch" || !me.batch_enabled) return;
     const timer = setInterval(() => batch?.recent.some(running) && api.batch().then((v) => (batch = v), () => {}), 10_000);
     return () => clearInterval(timer);
   });
@@ -211,7 +215,7 @@
               {/if}
             </Inline>
             <Heading as="h3" size="sm">{s.exportTitle}</Heading>
-            <Text tone="muted" size="sm">{s.exportHint}</Text>
+            <Text tone="muted" size="sm">{s.exportHint}{me.batch_enabled ? ` ${s.exportRestoreHint}` : ""}</Text>
             {#if exp?.status === "running"}
               <Inline gap="sm" align="center"><Spinner label="Loading" /><Text>{s.exportRunning}</Text></Inline>
             {:else if exp?.status === "failed"}
@@ -235,7 +239,7 @@
               <TextField label={fill(s.deleteLabel, { confirm: DELETE_CONFIRM })} bind:value={deleteText} size="sm" />
               <Button size="sm" variant="danger" loading={busy} disabled={deleteText !== DELETE_CONFIRM} onclick={() => act(deleteAll)}>{s.deleteButton}</Button>
             </Inline>
-          {:else if current.id === "batch"}
+          {:else if current.id === "batch" && me.batch_enabled}
             {#if !batch}
               <Spinner label="Loading" />
             {:else}
@@ -259,7 +263,7 @@
                 accept=".zip,application/zip"
                 hidden
                 onchange={(e) => {
-                  addFiles(e.currentTarget.files ?? []);
+                  addFiles(e.currentTarget.files ?? [], me.batch_enabled);
                   e.currentTarget.value = "";
                   onClose();
                 }}

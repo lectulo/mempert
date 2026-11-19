@@ -11,7 +11,7 @@ import type { Env } from "../env";
 // Business modules transitively import the legacy edge entrypoint through widget helpers.
 mock.module("../index", () => ({ default: {} }));
 mock.module("@cloudflare/workers-oauth-provider", () => ({ AuthorizationError: class extends Error {}, getOAuthApi: () => ({}), default: class {} }));
-const { recoverZipItems, handleZipCallback } = await import("../zip");
+const { createZipImport, recoverZipItems, handleUpload, handleZipCallback } = await import("../zip");
 
 const open: LocalDatabase[] = [];
 let network: ReturnType<typeof spyOn<typeof globalThis, "fetch">>;
@@ -45,7 +45,7 @@ afterEach(async () => {
 function fixture() {
   const db = new LocalDatabase(":memory:", join(import.meta.dir, "../../migrations")); open.push(db);
   const sent: unknown[] = [];
-  const env = { DB: db, INTERNAL_URL:"http://app", WORKER_SECRET:"secret", ENCRYPTION_KEY:"key", BOT_TOKEN:"1:fixture",
+  const env = { DB: db, PUBLIC_URL:"http://app", INTERNAL_URL:"http://app", WORKER_SECRET:"secret", ENCRYPTION_KEY:"key", BOT_TOKEN:"1:fixture",
     JOBS: {send:async(body:unknown) => {sent.push(body);}},
     MEDIA:{delete:async()=>{}}, LIVE:{idFromName:(s:string)=>s,get:()=>({push:async()=>{}})},
   } as unknown as Env;
@@ -90,6 +90,49 @@ test("ZIP done persists batch continuation before terminal status and cleanup", 
   expect(db.sqlite.query("SELECT count(*) AS n FROM worker_continuations").get()).toEqual({n:1});
   await recoverZipItems(env); await flushJobContinuations(env);
   expect(sent).toEqual([{type:"batch_submit",importId:"batch"}]);
+});
+
+test("disabled ZIP uploads reject new links and all actions on stale signed links", async () => {
+  const {db,env,sent}=fixture();
+  db.sqlite.exec("INSERT INTO users(id,role) VALUES(1,'user')");
+  const zip = await createZipImport(env, 1, "en");
+  env.BATCH_ENABLED = "false";
+  await expect(createZipImport(env, 1, "en")).rejects.toThrow("Batch imports are disabled");
+  const ctx = {} as ExecutionContext;
+  const page = await handleUpload(new Request(zip.url), env, ctx);
+  expect(page.status).toBe(403);
+  const html = await page.text();
+  expect(html).toContain("Batch imports are disabled");
+  expect(html).not.toContain('type="file"');
+  for (const [action, method] of [["start", "POST"], ["part", "PUT"], ["complete", "POST"]]) {
+    const url = new URL(zip.url);
+    url.pathname += `/${action}`;
+    const response = await handleUpload(new Request(url.toString(), { method, body: "{}" }), env, ctx);
+    expect(response.status).toBe(403);
+    expect(await response.json<{ error: string }>()).toEqual({ error: "batch_disabled" });
+  }
+  expect(db.sqlite.query("SELECT status,upload_id FROM zip_imports").all()).toEqual([{ status: "uploading", upload_id: null }]);
+  expect(sent).toEqual([]);
+});
+
+test("disabled ZIP recovery stops saved photos and does not replay interrupted items", async () => {
+  const {db,env,sent}=fixture();
+  env.BATCH_ENABLED = "false";
+  db.sqlite.exec(`INSERT INTO users(id,role) VALUES(1,'user');
+    INSERT INTO zip_imports(id,user_id,import_id,status) VALUES('running',1,'batch1','running'),('old',1,'batch2','done');
+    INSERT INTO memes(id,user_id,kind,file_id,file_unique_id,import_id) VALUES
+      ('m1',1,'photo','','unique1','batch1'),('m2',1,'photo','','unique2','batch2');
+    INSERT INTO zip_pending_items VALUES ('running','{"items":[]}');`);
+  await recoverZipItems(env);
+  await flushJobContinuations(env);
+  expect(db.sqlite.query("SELECT status FROM zip_imports WHERE id='running'").get()).toEqual({ status: "failed" });
+  expect(db.sqlite.query("SELECT status FROM memes ORDER BY id").all()).toEqual([{ status: "failed" }, { status: "failed" }]);
+  expect(db.sqlite.query("SELECT count(*) AS n FROM zip_pending_items").get()).toEqual({ n: 0 });
+  expect(db.sqlite.query("SELECT count(*) AS n FROM imports").get()).toEqual({ n: 0 });
+  env.BATCH_ENABLED = "true";
+  await recoverZipItems(env);
+  await flushJobContinuations(env);
+  expect(sent).toEqual([]);
 });
 test("export media callback streams a local object without reading arrayBuffer", async () => {
   const {db,env}=fixture();

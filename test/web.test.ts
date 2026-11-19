@@ -109,6 +109,40 @@ describe("web upload", () => {
   });
 });
 
+describe("batch feature toggle", () => {
+  it("blocks stale batch mutations but leaves status and ordinary photo uploads available", async () => {
+    const disabled: Env = { ...e, BATCH_ENABLED: "false" };
+    await e.DB.prepare("INSERT INTO users (id, role) VALUES (68, 'user')").run();
+    await e.DB.prepare("INSERT INTO imports (id, user_id, status) VALUES ('collecting', 68, 'collecting'), ('submitted', 68, 'submitted')").run();
+    await e.DB.prepare("INSERT INTO zip_imports (id, user_id, import_id, status) VALUES ('unpacking', 68, 'archive-batch', 'running')").run();
+    const headers = { Cookie: `session=${await createSession(e, 68)}` };
+    const call = async (path: string, init?: RequestInit, settings = disabled) =>
+      (await handleApp(new Request(`https://m.example/app/api/${path}`, { ...init, headers }), settings, ctx))!;
+
+    expect(await (await call("me")).json()).toMatchObject({ batch_enabled: false });
+    expect(await (await call("me", undefined, { ...e, BATCH_ENABLED: undefined })).json()).toMatchObject({ batch_enabled: true });
+    for (const path of ["batch/start", "batch/finish", "batch/cancel", "batch/retry", "zip"]) {
+      const res = await call(path, { method: "POST" });
+      expect(res.status, path).toBe(403);
+      expect(await res.json()).toEqual({ error: "batch disabled" });
+    }
+    expect(await (await call("batch")).json()).toMatchObject({
+      collecting: { id: "collecting", status: "collecting" },
+      recent: [{ id: "submitted", status: "submitted" }],
+    });
+    expect(await (await call("zip/unpacking")).json()).toMatchObject({ status: "running" });
+
+    const body = new FormData();
+    body.append("file", new File(["PNGDATA"], "batch-disabled.png", { type: "image/png" }));
+    const uploaded = await call("upload", { method: "POST", body });
+    expect(uploaded.status).toBe(200);
+    const photo = await uploaded.json<{ id: string; duplicate: boolean; batched: boolean }>();
+    expect(photo).toMatchObject({ duplicate: false, batched: false });
+    expect(await e.DB.prepare("SELECT import_id FROM memes WHERE id = ?").bind(photo.id).first()).toEqual({ import_id: null });
+    expect(jobs).toContainEqual({ type: "embed", memeId: photo.id });
+  });
+});
+
 describe("web import by link", () => {
   const post = async (cookie: string, url: string) =>
     (await handleApp(new Request("https://m.example/app/api/import", { method: "POST", body: JSON.stringify({ url }), headers: { Cookie: cookie } }), e, ctx))!;

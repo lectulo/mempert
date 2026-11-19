@@ -5,6 +5,7 @@ import { ALBUM_FIRST, albumSizes, visible, deleteMeme, deleteMemes, getMeme, get
 import { insertMeme, type AddedVia } from "./ingest/receive";
 import { parseJson, saveDescription, toDescription, type Description, type SourceMeta } from "./ingest/describe";
 import { collectingImport } from "./batch";
+import { batchEnabled } from "./batchmode";
 import { MODELS } from "./config";
 import { photoModel } from "./photoprovider";
 import { handleAccount } from "./webaccount";
@@ -283,8 +284,10 @@ export async function saveUpload(env: Env, user: User, file: File, meta: UploadM
   const sm = meta.sourceMeta && JSON.stringify(meta.sourceMeta);
   const source_meta = sm && sm.length > 100_000 ? JSON.stringify({ ...meta.sourceMeta, data: null }) : sm;
 
-  // Photos join an open batch import (/batch), like forwards in the bot.
-  const importId = kind === "photo" && !meta.description && meta.post?.layout !== "comic" ? await collectingImport(env.DB, user.id) : null;
+  // Photos join an open batch import (/batch), like forwards in the bot, only when enabled.
+  const importId = kind === "photo" && !meta.description && meta.post?.layout !== "comic" && batchEnabled(env)
+    ? await collectingImport(env.DB, user.id)
+    : null;
   const id = await insertMeme(env.DB, user.id, {
     kind,
     file_id: "",
@@ -327,7 +330,8 @@ export async function downloadLinks(env: Env, userId: number, ids: string[]) {
 /** Same as forwarding a failed meme again in the bot; false when the meme has not failed. */
 export async function retryMeme(env: Env, meme: Meme) {
   if (meme.status !== "failed") return false;
-  await env.DB.prepare("UPDATE memes SET status = 'embedding', error = NULL, updated_at = unixepoch() WHERE id = ?").bind(meme.id).run();
+  await env.DB.prepare(`UPDATE memes SET status = 'embedding', error = NULL, ${batchEnabled(env) ? "" : "import_id = NULL,"}
+    updated_at = unixepoch() WHERE id = ?`).bind(meme.id).run();
   await env.JOBS.send({ type: "embed", memeId: meme.id, gen: meme.gen });
   return true;
 }
@@ -460,6 +464,7 @@ async function handleApi(req: Request, env: Env, url: URL): Promise<Response> {
       describe_tier: user.describe_tier,
       hide_porn: !!user.hide_porn,
       blur_porn: !!user.blur_porn,
+      batch_enabled: batchEnabled(env),
       billing: await billingStatus(env, user),
     });
   }
@@ -468,9 +473,7 @@ async function handleApi(req: Request, env: Env, url: URL): Promise<Response> {
   const aiWork =
     ((resource === "upload" || resource === "import") && m === "POST") ||
     (resource === "search" && !freeSearch) ||
-    (resource === "zip" && m === "POST" && !id) ||
     (resource === "e621" && m === "PUT") ||
-    (resource === "batch" && m === "POST" && (id === "start" || id === "retry")) ||
     (action === "retry" && m === "POST");
   if (aiWork) {
     const gate = await canUseAi(env.DB, user);

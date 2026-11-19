@@ -5,6 +5,8 @@ import { t } from "../i18n";
 import { memeMedia, tmpKey, toDataUrl, variantOf } from "../media";
 import { embed } from "../openrouter";
 import { editStatus } from "./describe";
+import { stopUnsubmittedImport } from "../batch";
+import { batchEnabled } from "../batchmode";
 
 const DOWNLOAD_MAX = 20 * 1024 * 1024; // Bot API getFile limit
 
@@ -110,6 +112,10 @@ export async function memeVectors(env: Env, userId: number | number[], idList: s
 export async function embedStage(env: Env, memeId: string, gen = 0) {
   const m = await getMeme(env.DB, memeId);
   if (!m || m.gen !== gen || m.status === "ready" || m.status === "failed") return;
+  if (m.import_id && m.title === null && !batchEnabled(env)) {
+    await stopUnsubmittedImport(env, m.import_id);
+    return; // a known submitted batch can still finish from the provider response
+  }
   if (m.status === "embedding") {
     if (m.sha256 === null && (await dedupe(env, m))) return;
     // Photos embed the image itself; videos and GIFs their preview frame, if there is one.
@@ -125,5 +131,5 @@ export async function embedStage(env: Env, memeId: string, gen = 0) {
     await push(env, m.user_id, { t: "meme", id: memeId, status: "describing" }); // a new (or retried) meme shows up in the web app
   }
   // Batch import memes wait for /batch_finish instead.
-  if (!m.import_id) await env.JOBS.send({ type: "describe", memeId, gen });
+  if (!m.import_id || (m.title !== null && !batchEnabled(env))) await env.JOBS.send({ type: "describe", memeId, gen });
 }

@@ -14,6 +14,8 @@ import { uploadPage } from "./uploadpage";
 import { editWidget, progressApi, sendWidget } from "./widget";
 import { progressPage } from "./widgetpages";
 import { continueJob, jobDatabase, notifyJob } from "./job";
+import { BATCH_DISABLED_ERROR, stopUnsubmittedImport } from "./batch";
+import { batchEnabled } from "./batchmode";
 
 const LINK_TTL = 86400;
 const blobKey = (userId: number, sha256: string) => `u/${userId}/${sha256}`;
@@ -142,6 +144,7 @@ async function progress(env: Env, zip: ZipImport, p: { found: number; total: num
 
 /** /batch_zip: opens batch mode if needed and returns the text and upload link for a new zip import. */
 export async function createZipImport(env: Env, userId: number, lang: Lang) {
+  if (!batchEnabled(env)) throw new Error(BATCH_DISABLED_ERROR);
   // Each archive gets its own batch: its photos are submitted when the import ends, without /batch_finish.
   const importId = crypto.randomUUID().replaceAll("-", "");
   const id = crypto.randomUUID().replaceAll("-", "");
@@ -160,9 +163,9 @@ export const zipStatus = (db: D1Database, id: string, userId: number) =>
 export const setZipStatusMessage = (db: D1Database, id: string, messageId: number) =>
   db.prepare("UPDATE zip_imports SET status_msg_id = ? WHERE id = ?").bind(messageId, id).run();
 
-/** Marks a running or uploading zip import failed, deletes the archive and tells the user. */
 /** Submits the archive's photos as a half-price batch (the import row is created only now). */
 export async function submitZipPhotos(env: Env, zip: ZipImport) {
+  if (!batchEnabled(env)) return stopUnsubmittedImport(env, zip.import_id);
   const photos = await env.DB.prepare("SELECT 1 FROM memes WHERE import_id = ? LIMIT 1").bind(zip.import_id).first();
   if (!photos) return;
   await env.DB.prepare("INSERT OR IGNORE INTO imports (id, user_id, status, status_msg_id) VALUES (?, ?, 'submitting', ?)")
@@ -171,14 +174,22 @@ export async function submitZipPhotos(env: Env, zip: ZipImport) {
   await continueJob(env, `zip:${zip.id}:batch`, { type: "batch_submit", importId: zip.import_id });
 }
 
+/** Marks a running or uploading zip import failed, deletes the archive and tells the user. */
 export async function failZip(env: Env, id: string, error: string) {
+  // In disabled mode stop the photos before setting a terminal archive state,
+  // so a crash cannot let archive recovery schedule them when re-enabled.
+  const batches = batchEnabled(env);
+  if (!batches) {
+    const pending = await getZip(env.DB, id);
+    if (pending?.status === "running" || pending?.status === "uploading") await submitZipPhotos(env, pending);
+  }
   const zip = await env.DB.prepare(
     "UPDATE zip_imports SET status = 'failed', error = ?, updated_at = unixepoch() WHERE id = ? AND status IN ('uploading', 'running') RETURNING *",
   )
     .bind(error.slice(0, 1000), id)
     .first<ZipImport>();
   if (!zip) return;
-  await submitZipPhotos(env, zip); // photos saved before the failure still get described
+  if (batches) await submitZipPhotos(env, zip); // photos saved before the failure still get described
   notifyJob(async () => {
     await push(env, zip.user_id, { t: "job", kind: "zip" });
     await env.MEDIA.delete(zipKey(id));
@@ -195,6 +206,10 @@ export async function handleUpload(req: Request, env: Env, ctx: ExecutionContext
   const zip = (await verifyQuery(env, `upload|${id}`, url)) ? await getZip(env.DB, id) : null;
   if (!zip) return new Response("Link is invalid or expired", { status: 403 });
   const lang = await userLang(env.DB, zip.user_id);
+  if (!batchEnabled(env)) {
+    if (!action && req.method === "GET") return uploadPage(lang, false, true);
+    return json({ error: "batch_disabled" }, 403);
+  }
   if (!action && req.method === "GET") return uploadPage(lang, zip.status === "uploading");
   if (zip.status !== "uploading") return json({ error: "already uploaded" }, 409);
 
@@ -232,6 +247,10 @@ export async function handleZipCallback(req: Request, env: Env): Promise<Respons
   const token = req.headers.get("Authorization")?.replace(/^Bearer /, "") ?? "";
   const zip = (await verify(env, `zip|${id}`, token)) ? await getZip(env.DB, id) : null;
   if (zip?.status !== "running") return json({ error: "not running" }, 403);
+  if (!batchEnabled(env)) {
+    await failZip(env, id, BATCH_DISABLED_ERROR);
+    return json({ error: "batch_disabled" }, 403);
+  }
   const db = env.DB;
 
   if (action === "file") {
@@ -362,20 +381,33 @@ export async function handleZipCallback(req: Request, env: Env): Promise<Respons
   return json({ error: "not found" }, 404);
 }
 
+/** Cancel archives not yet unpacked rather than processing their photos at full price. */
+export async function stopRunningZipImports(env: Env) {
+  if (batchEnabled(env)) return;
+  const { results } = await env.DB.prepare("SELECT id FROM zip_imports WHERE status = 'running'").all<{ id: string }>();
+  for (const row of results) await failZip(env, row.id, BATCH_DISABLED_ERROR);
+}
+
 /** Targeted recovery of an interrupted /items callback, before the next archive filter. */
 export async function recoverZipItems(env: Env) {
   const local = jobDatabase(env);
   if (!local) return;
+  await stopRunningZipImports(env);
   for (const row of local.query<{zip_id: string; body: string}, []>("SELECT * FROM zip_pending_items").all()) {
     const zip = await getZip(env.DB, row.zip_id);
-    if (zip?.status !== "running") continue;
+    if (zip?.status !== "running") {
+      local.query("DELETE FROM zip_pending_items WHERE zip_id = ?").run(row.zip_id);
+      continue;
+    }
     const response = await handleZipCallback(new Request(`${env.INTERNAL_URL}/zip/${row.zip_id}/items`, {
       method: "POST", headers: { Authorization: `Bearer ${await sign(env, `zip|${row.zip_id}`)}`, "Content-Type": "application/json" }, body: row.body,
     }), env);
     if (!response.ok) throw new Error(`ZIP recovery ${response.status}`);
   }
   // Also covers death after business terminal status but before its mandatory continuation.
-  const { results } = await env.DB.prepare("SELECT * FROM zip_imports WHERE status IN ('done','failed') AND EXISTS (SELECT 1 FROM memes WHERE import_id = zip_imports.import_id) AND NOT EXISTS (SELECT 1 FROM imports WHERE id = zip_imports.import_id AND status != 'submitting')").all<ZipImport>();
+  const { results } = await env.DB.prepare(`SELECT * FROM zip_imports WHERE status IN ('done','failed')
+    AND EXISTS (SELECT 1 FROM memes WHERE import_id = zip_imports.import_id AND status IN ('embedding','describing'))
+    AND NOT EXISTS (SELECT 1 FROM imports WHERE id = zip_imports.import_id AND status != 'submitting')`).all<ZipImport>();
   for (const zip of results) await submitZipPhotos(env, zip);
 }
 

@@ -1,4 +1,5 @@
 import { botApi } from "./botapi";
+import { batchEnabled } from "./batchmode";
 import { DESCRIBE_MODELS, MODELS } from "./config";
 import { getMeme, getUser, userLang, type Meme } from "./db";
 import type { Env } from "./env";
@@ -19,6 +20,7 @@ const MAX_ATTEMPTS = 3; // batch submits per import before giving up on failed p
 // After the last attempt only a few stragglers go to the full-price pipeline; a batch that mostly failed
 // (e.g. the provider rejected it) is stopped instead of being re-run at twice the cost.
 const fallbackLimit = (photos: number) => Math.max(5, Math.ceil(photos * 0.1));
+export const BATCH_DISABLED_ERROR = "Batch imports are disabled; photos were not sent to full-price processing";
 
 interface Import {
   id: string;
@@ -67,11 +69,58 @@ function continuation(db: D1Database, job: Job) {
 
 /** At-least-once enqueue: never delete the durable intent before send succeeds. */
 export async function flushBatchContinuations(env: Env) {
+  const disabled = !batchEnabled(env);
   const { results } = await env.DB.prepare("SELECT id, body FROM batch_continuations").all<{ id: string; body: string }>();
   for (const row of results) {
-    await env.JOBS.send(JSON.parse(row.body) as Job);
+    const job = JSON.parse(row.body) as Job;
+    if (disabled && job.type === "batch_submit") {
+      await stopUnsubmittedImport(env, job.importId);
+    } else if (disabled && job.type === "describe") {
+      // These durable describe jobs are fallback work from an earlier batch poll.
+      await env.DB.prepare("UPDATE memes SET status='failed', error=?, gen=gen+1, updated_at=unixepoch() WHERE id=? AND gen=? AND status='describing' AND title IS NULL")
+        .bind(BATCH_DISABLED_ERROR, job.memeId, job.gen ?? 0).run();
+    } else {
+      await env.JOBS.send(job);
+    }
     await env.DB.prepare("DELETE FROM batch_continuations WHERE id = ?").bind(row.id).run();
   }
+}
+
+/** Stop work that was collected but never handed to the provider, without queuing full-price descriptions. */
+export async function stopUnsubmittedImport(env: Env, importId: string) {
+  const [imports] = await env.DB.batch<Status>([
+    env.DB.prepare(`UPDATE imports SET status='failed', error=?, updated_at=unixepoch()
+      WHERE id=? AND status IN ('collecting','submitting') AND submission_started=0 RETURNING user_id, status_msg_id`)
+      .bind(BATCH_DISABLED_ERROR, importId),
+    env.DB.prepare(`UPDATE memes SET status='failed', error=?, gen=gen+1, updated_at=unixepoch()
+      WHERE import_id=? AND status IN ('embedding','describing') AND title IS NULL
+      AND NOT EXISTS (SELECT 1 FROM imports WHERE id=? AND NOT (status='failed' AND error IS ?))`)
+      .bind(BATCH_DISABLED_ERROR, importId, importId, BATCH_DISABLED_ERROR),
+  ]);
+  await persistDescribedContinuations(env, importId);
+  for (const imp of imports.results) {
+    // The database transition is authoritative; don't block startup on Telegram.
+    void notify(env, imp, "batch_disabled").catch(console.error);
+  }
+}
+
+export async function stopUnsubmittedImports(env: Env) {
+  if (batchEnabled(env)) return;
+  const { results } = await env.DB.prepare("SELECT id FROM imports WHERE status IN ('collecting','submitting') AND submission_started=0").all<{ id: string }>();
+  for (const imp of results) await stopUnsubmittedImport(env, imp.id);
+}
+
+/** Do not let stale description jobs (including album work) bypass the disabled batch policy. */
+export async function stopBatchDescription(env: Env, m: Meme, from: number) {
+  if (batchEnabled(env) || m.title !== null || (!m.import_id && from !== 1)) return false;
+  // Submitted/processing photos stay pending for provider results. A queued
+  // normal-price description is never needed for one of those photos.
+  await env.DB.prepare(`UPDATE memes SET status='failed', error=?, gen=gen+1, updated_at=unixepoch()
+    WHERE id=? AND gen=? AND status='describing' AND title IS NULL
+    AND NOT EXISTS (SELECT 1 FROM imports WHERE id=memes.import_id
+      AND (status IN ('submitted','processing') OR (status='submitting' AND submission_started=1)))`)
+    .bind(BATCH_DISABLED_ERROR, m.id, m.gen).run();
+  return true;
 }
 
 async function failUnknownSubmission(env: Env, imp: Import) {
@@ -93,11 +142,12 @@ async function failUnknownSubmission(env: Env, imp: Import) {
  */
 export async function recoverBatchImports(env: Env) {
   await env.DB.prepare("UPDATE imports SET status = 'submitted' WHERE status = 'processing' AND batch_id IS NOT NULL").run();
+  await stopUnsubmittedImports(env);
   const { results } = await env.DB.prepare("SELECT * FROM imports WHERE status IN ('submitting', 'processing')").all<Import>();
   for (const imp of results) {
     if (imp.submission_started || imp.status === "processing") {
       await failUnknownSubmission(env, imp);
-    } else {
+    } else if (batchEnabled(env)) {
       await continuation(env.DB, { type: "batch_submit", importId: imp.id }).run();
     }
   }
@@ -123,7 +173,9 @@ export const countMemes = async (db: D1Database, importId: string) =>
   (await db.prepare("SELECT COUNT(*) AS n FROM memes WHERE import_id = ?").bind(importId).first<number>("n")) ?? 0;
 
 /** Opens batch mode. Returns the photo count when it was already open. */
-export async function startImport(db: D1Database, userId: number): Promise<{ created: boolean; count: number }> {
+export async function startImport(env: Env, userId: number): Promise<{ created: boolean; count: number }> {
+  if (!batchEnabled(env)) return { created: false, count: 0 };
+  const db = env.DB;
   const id = await db
     .prepare("INSERT INTO imports (id, user_id, status) VALUES (?, ?, 'collecting') ON CONFLICT DO NOTHING RETURNING id")
     .bind(crypto.randomUUID().replaceAll("-", ""), userId)
@@ -185,6 +237,7 @@ export async function batchProgress(env: Env, userId: number): Promise<{ collect
  * failed videos and GIFs go through the normal pipeline. Returns how many memes were retried.
  */
 export async function retryFailed(env: Env, userId: number, statusMsgId: number | null) {
+  if (!batchEnabled(env)) return { photos: 0, others: 0 };
   const db = env.DB;
   const importId = crypto.randomUUID().replaceAll("-", "");
   // Photos that already have a description skip the batch: describeStage reuses it and only finishes them.
@@ -206,6 +259,7 @@ export async function retryFailed(env: Env, userId: number, statusMsgId: number 
 
 /** /batch_finish from the app: the bot posts the status message in the chat, as for the command. */
 export async function finishImportFromApp(env: Env, userId: number): Promise<boolean> {
+  if (!batchEnabled(env)) return false;
   const id = await collectingImport(env.DB, userId);
   if (!id) return false;
   const text = t(await userLang(env.DB, userId), "batch_finishing", { n: await countMemes(env.DB, id) });
@@ -215,6 +269,7 @@ export async function finishImportFromApp(env: Env, userId: number): Promise<boo
 
 /** Closes batch mode and queues the submit; later updates edit `statusMsgId`. Returns false when batch mode is off. */
 export async function finishImport(env: Env, userId: number, statusMsgId: number): Promise<boolean> {
+  if (!batchEnabled(env)) return false;
   const id = await env.DB.prepare(
     "UPDATE imports SET status = 'submitting', status_msg_id = ?, updated_at = unixepoch() WHERE user_id = ? AND status = 'collecting' RETURNING id",
   )
@@ -227,6 +282,7 @@ export async function finishImport(env: Env, userId: number, statusMsgId: number
 
 /** Closes batch mode; collected photos continue in the normal pipeline. Returns the photo count, or null. */
 export async function cancelImport(env: Env, userId: number): Promise<number | null> {
+  if (!batchEnabled(env)) return null; // cancelling normally converts the whole import to full-price processing
   const id = await env.DB.prepare(
     "UPDATE imports SET status = 'cancelled', updated_at = unixepoch() WHERE user_id = ? AND status = 'collecting' RETURNING id",
   )
@@ -241,6 +297,7 @@ export async function cancelImport(env: Env, userId: number): Promise<number | n
 
 /** Submits one describe batch for the import's photos (no server tools; images as signed URLs). */
 export async function submitImport(env: Env, importId: string) {
+  if (!batchEnabled(env)) return stopUnsubmittedImport(env, importId);
   const imp = await env.DB.prepare("SELECT * FROM imports WHERE id = ?").bind(importId).first<Import>();
   if (imp?.status !== "submitting") return;
   if (imp.submission_started) return; // another submit owns it; startup resolves interrupted ownership
@@ -319,9 +376,11 @@ async function batchImageUrl(env: Env, m: Meme) {
 /** Last-retry failure of a submit: the photos go to the normal pipeline. */
 export async function failImport(env: Env, importId: string, error: unknown) {
   const current = await env.DB.prepare("SELECT * FROM imports WHERE id=?").bind(importId).first<Import>();
-  if (current?.submission_started) return failUnknownSubmission(env, current);
+  if (current?.status !== "submitting") return;
+  if (!batchEnabled(env)) return stopUnsubmittedImport(env, importId);
+  if (current.submission_started) return failUnknownSubmission(env, current);
   const imp = await env.DB.prepare(
-    "UPDATE imports SET status = 'failed', error = ?, updated_at = unixepoch() WHERE id = ? RETURNING user_id, status_msg_id",
+    "UPDATE imports SET status = 'failed', error = ?, updated_at = unixepoch() WHERE id = ? AND status = 'submitting' AND submission_started=0 RETURNING user_id, status_msg_id",
   )
     .bind(String(error).slice(0, 1000), importId)
     .first<Status>();
@@ -346,6 +405,11 @@ export async function pollImports(env: Env) {
  * the batch: detach them and run only the last step (text embedding, ready).
  */
 async function finishDescribed(env: Env, importId: string) {
+  await persistDescribedContinuations(env, importId);
+  await flushBatchContinuations(env);
+}
+
+async function persistDescribedContinuations(env: Env, importId: string) {
   const { results } = await env.DB.prepare(
     "SELECT id, gen FROM memes WHERE import_id = ? AND status = 'describing' AND title IS NOT NULL",
   )
@@ -355,11 +419,11 @@ async function finishDescribed(env: Env, importId: string) {
     continuation(env.DB, { type: "finish", memeId: r.id, gen: r.gen }),
     env.DB.prepare("UPDATE memes SET import_id=NULL WHERE id=? AND gen=? AND import_id=?").bind(r.id, r.gen, importId),
   ]);
-  await flushBatchContinuations(env);
 }
 
 async function pollImport(env: Env, imp: Import) {
   const db = env.DB;
+  const enabled = batchEnabled(env);
   const batch = await getBatch(env, imp.user_id, imp.key_source!, imp.batch_id!);
   if (RUNNING.includes(batch.status)) return;
   const claimed = await db
@@ -409,7 +473,7 @@ async function pollImport(env: Env, imp: Import) {
       db.prepare("INSERT OR IGNORE INTO batch_spend_receipts (batch_id,import_id) VALUES (?,?)").bind(imp.batch_id, imp.id),
     ]);
     // Blocked photos leave the import and go to the next describe model one by one.
-    for (const m of blocked) await db.batch([
+    for (const m of enabled ? blocked : []) await db.batch([
       continuation(db, { type: "describe", memeId: m.id, gen: m.gen, from: 1 }),
       db.prepare("UPDATE memes SET import_id=NULL WHERE id=? AND gen=?").bind(m.id, m.gen),
     ]);
@@ -419,6 +483,21 @@ async function pollImport(env: Env, imp: Import) {
     // Keep the batch status and the first errors to debug failures.
     const errors = (batch.results ?? []).filter((r) => r.error).slice(0, 3);
     const error = batch.status === "completed" && !errors.length ? null : JSON.stringify({ ...batch, results: errors }).slice(0, 2000);
+
+    if (!enabled) {
+      const unresolved = retry.length + blocked.length;
+      await db.batch([
+        db.prepare(`UPDATE memes SET status='failed', error=?, gen=gen+1, updated_at=unixepoch()
+          WHERE import_id=? AND status IN ('embedding','describing') AND title IS NULL`)
+          .bind(BATCH_DISABLED_ERROR, imp.id),
+        db.prepare("UPDATE imports SET status=?, error=?, updated_at=unixepoch() WHERE id=?")
+          .bind(unresolved || !described ? "failed" : "done", unresolved ? error ?? BATCH_DISABLED_ERROR : error, imp.id),
+      ]);
+      await notify(env, imp, unresolved || !described ? "batch_stopped" : "batch_done", {
+        ok: described, n: unresolved, cost: usd(cost), reason: esc(BATCH_DISABLED_ERROR),
+      });
+      return;
+    }
 
     if (retry.length && imp.attempts < MAX_ATTEMPTS) {
       // Resubmit only the failed photos (they are still pending) in a new batch.
@@ -438,8 +517,9 @@ async function pollImport(env: Env, imp: Import) {
     } else {
       for (let i = 0; i < retry.length; i += 50) {
         const ids = retry.slice(i, i + 50).map((m) => m.id);
-        await db.prepare(`UPDATE memes SET status = 'failed', error = ?, updated_at = unixepoch() WHERE id IN (${ids.map(() => "?").join(",")})`)
-          .bind(`batch: ${reason}`.slice(0, 1000), ...ids)
+        await db.prepare(`UPDATE memes SET status = 'failed', error = ?, updated_at = unixepoch()
+          WHERE import_id=? AND status IN ('embedding','describing') AND title IS NULL AND id IN (${ids.map(() => "?").join(",")})`)
+          .bind(`batch: ${reason}`.slice(0, 1000), imp.id, ...ids)
           .run();
         for (const id of ids) await push(env, imp.user_id, { t: "meme", id, status: "failed" });
       }

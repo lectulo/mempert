@@ -55,7 +55,7 @@ export function createBot(env: Env) {
     }
     ctx.user = res.user;
     if (res.created && res.user.role === "admin") {
-      await setCommandScope(ctx.api, res.user.id, "admin", ctx.lang).catch(console.error);
+      await setCommandScope(env, ctx.api, res.user.id, "admin", ctx.lang).catch(console.error);
     }
     await next();
   });

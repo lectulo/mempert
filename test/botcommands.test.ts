@@ -1,13 +1,13 @@
 import { env } from "cloudflare:test";
 import type { Api } from "grammy";
 import { describe, expect, it, vi } from "vitest";
-import { syncCommands } from "../src/botcommands";
+import { BATCH_COMMANDS, syncCommands } from "../src/botcommands";
 
 describe("syncCommands", () => {
   it("sets menus once and skips when nothing changed", async () => {
     await env.DB.prepare("INSERT INTO users (id, role, lang) VALUES (5, 'admin', 'ru')").run();
     const api = {
-      setMyCommands: vi.fn(async () => true),
+      setMyCommands: vi.fn(async (..._args: Parameters<Api["setMyCommands"]>) => true),
       deleteMyCommands: vi.fn(async () => true),
       setChatMenuButton: vi.fn(async () => true),
       setMyDescription: vi.fn(async () => true),
@@ -25,5 +25,18 @@ describe("syncCommands", () => {
     );
     expect(await syncCommands(env, api as unknown as Api)).toBe(false);
     expect(api.setMyCommands).toHaveBeenCalledTimes(3);
+
+    const disabled = { ...env, BATCH_ENABLED: "false" };
+    expect(await syncCommands(disabled, api as unknown as Api)).toBe(true);
+    expect(api.setMyCommands).toHaveBeenCalledTimes(6);
+    for (const index of [0, 1, 2]) {
+      const [enabledCommands] = api.setMyCommands.mock.calls[index];
+      const [disabledCommands] = api.setMyCommands.mock.calls[index + 3];
+      expect(enabledCommands.map(({ command }) => command)).toEqual(expect.arrayContaining(BATCH_COMMANDS));
+      expect(disabledCommands).toEqual(enabledCommands.filter(({ command }) => !BATCH_COMMANDS.includes(command)));
+    }
+    expect(api.setMyDescription).toHaveBeenNthCalledWith(3, expect.not.stringContaining("Import Telegram exports"), { language_code: undefined });
+    expect(await syncCommands(disabled, api as unknown as Api)).toBe(false);
+    expect(await syncCommands(env, api as unknown as Api)).toBe(true);
   });
 });

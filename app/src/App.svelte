@@ -369,7 +369,7 @@
   function onDrop(event: DragEvent) {
     event.preventDefault();
     dragging = false;
-    if (auth === "ok" && !viewing.who && event.dataTransfer?.files.length) addFiles(event.dataTransfer.files);
+    if (auth === "ok" && !viewing.who && event.dataTransfer?.files.length) addFiles(event.dataTransfer.files, !!me?.batch_enabled);
   }
 
   onMount(() => {
@@ -624,11 +624,11 @@
     <input
       bind:this={fileInput}
       type="file"
-      accept="image/*,video/*,.zip,application/zip"
+      accept={me?.batch_enabled ? "image/*,video/*,.zip,application/zip" : "image/*,video/*"}
       multiple
       hidden
       onchange={(e) => {
-        addFiles(e.currentTarget.files ?? []);
+        addFiles(e.currentTarget.files ?? [], !!me?.batch_enabled);
         e.currentTarget.value = "";
       }}
     />

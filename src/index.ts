@@ -19,10 +19,10 @@ import { handleApp } from "./webapp";
 import { serveOpenapi } from "./openapi";
 import { billingNotices } from "./billing";
 import { handleBtcpay } from "./crypto";
-import { expireZipUploads, handleUpload, handleZipCallback } from "./zip";
+import { expireZipUploads, handleUpload, handleZipCallback, stopRunningZipImports } from "./zip";
 import { handleShare } from "./share";
 import { handleUploads, queueUploads, type UploadJob } from "./search/tgupload";
-import { flushBatchContinuations } from "./batch";
+import { flushBatchContinuations, stopUnsubmittedImports } from "./batch";
 
 let handler: ((req: Request) => Promise<Response>) | undefined;
 let synced: Promise<unknown> | undefined;
@@ -70,6 +70,8 @@ export default {
   queue: (batch, env) =>
     batch.queue === "memesave-tgupload" ? handleUploads(batch as unknown as MessageBatch<UploadJob>, env) : handleBatch(batch, env),
   async scheduled(_, env) {
+    await stopUnsubmittedImports(env);
+    await stopRunningZipImports(env);
     await flushBatchContinuations(env);
     await expireZipUploads(env.DB);
     await expireExports(env.DB);

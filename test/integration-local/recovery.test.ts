@@ -2,8 +2,12 @@ import { afterEach, beforeEach, expect, mock, spyOn, test } from "bun:test";
 mock.module("cloudflare:workers", () => ({ WorkerEntrypoint: class WorkerEntrypoint {} }));
 import { fixture, vector } from "./fixture";
 import type { Env } from "../../src/env";
+import type { Ctx } from "../../src/bot";
 import { Api } from "grammy";
-const { pollImports, recoverBatchImports } = await import("../../src/batch");
+const { BATCH_DISABLED_ERROR, cancelImport, finishImport, pollImports, recoverBatchImports, retryFailed, startImport, submitImport } = await import("../../src/batch");
+const { describeStage } = await import("../../src/ingest/describe");
+const { embedStage } = await import("../../src/ingest/embed");
+const { receiveMedia } = await import("../../src/ingest/receive");
 const { hybridSearch } = await import("../../src/search/hybrid");
 const { queueUploads, uploadJob } = await import("../../src/search/tgupload");
 
@@ -99,6 +103,87 @@ test("startup fails ambiguous external submit visibly without resubmitting AI", 
   expect(notices).toHaveLength(1);
   expect(notices[0]).toContain("external outcome unknown");
   expect(f.jobs).toEqual([]);
+});
+
+test("disabled batches stop unsubmitted work on startup and reject stale queue jobs", async () => {
+  Object.assign(f.env, { BATCH_ENABLED: "false" });
+  for (const id of ["collecting", "submitting", "stale", "described", "normal", "blocked"]) await f.meme(id, 101);
+  await f.env.DB.exec("INSERT INTO imports(id,user_id,status) VALUES ('open',101,'collecting'),('queued',101,'submitting');");
+  await f.env.DB.exec("UPDATE memes SET title=NULL,status='embedding',import_id='open' WHERE id='collecting';");
+  await f.env.DB.exec("UPDATE memes SET title=NULL,status='describing',import_id='queued' WHERE id='submitting';");
+  await f.env.DB.exec("UPDATE memes SET status='describing',import_id='queued' WHERE id='described';");
+  await f.env.DB.exec("UPDATE memes SET status='describing',title=NULL WHERE id IN ('normal','blocked');");
+  const staleJob = JSON.stringify({ type: "batch_submit", importId: "queued" });
+  await f.env.DB.prepare("INSERT INTO batch_continuations(id,body) VALUES (?,?)").bind(staleJob, staleJob).run();
+
+  expect(await startImport(f.env, 202)).toEqual({ created: false, count: 0 });
+  expect(await finishImport(f.env, 101, 1)).toBe(false);
+  expect(await cancelImport(f.env, 101)).toBeNull();
+  await recoverBatchImports(f.env);
+  expect((await f.env.DB.prepare("SELECT DISTINCT status,error FROM imports").all()).results).toEqual([{ status: "failed", error: BATCH_DISABLED_ERROR }]);
+  expect(await retryFailed(f.env, 101, null)).toEqual({ photos: 0, others: 0 });
+  expect(await f.env.DB.prepare("SELECT count(*) AS n FROM batch_continuations").first<number>("n")).toBe(0);
+  expect(f.jobs).toEqual([{ type: "finish", memeId: "described", gen: 0 }]);
+
+  // Simulate a stale batch_submit already on the queue (e.g. from a pre-change deployment).
+  await f.env.DB.exec("INSERT INTO imports(id,user_id,status) VALUES ('late',101,'submitting');");
+  await f.env.DB.exec("UPDATE memes SET title=NULL,status='describing',import_id='late' WHERE id='stale';");
+  await submitImport(f.env, "late");
+  await describeStage(f.env, "stale");
+  await describeStage(f.env, "blocked", 1); // old batch policy detached content-blocked photos before enqueue
+  await embedStage(f.env, "normal");
+  expect((await f.env.DB.prepare("SELECT id FROM memes WHERE status='failed' ORDER BY id").all()).results)
+    .toEqual(["blocked", "collecting", "stale", "submitting"].map(id => ({ id })));
+  expect(f.jobs).toEqual([{ type: "finish", memeId: "described", gen: 0 }, { type: "describe", memeId: "normal", gen: 0 }]);
+  const { retryMeme } = await import("../../src/webapp");
+  const { getMeme } = await import("../../src/db");
+  const stopped = (await getMeme(f.env.DB, "stale"))!;
+  expect(await retryMeme(f.env, stopped)).toBe(true);
+  expect((await getMeme(f.env.DB, "stale"))?.import_id).toBeNull();
+  expect(f.jobs.at(-1)).toEqual({ type: "embed", memeId: "stale", gen: stopped.gen });
+});
+
+test("disabled startup recovers a known batch and bills successes once without retrying failures", async () => {
+  Object.assign(f.env, { BATCH_ENABLED: "false" });
+  await submitted();
+  for (const id of ["failed", "blocked"]) await f.meme(id, 101);
+  await f.env.DB.exec("UPDATE memes SET status='describing',title=NULL,import_id='imp' WHERE id!='photo';");
+  await f.env.DB.exec("UPDATE imports SET status='processing';");
+  let polls = 0;
+  network.mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    if (String(input) !== "https://openrouter.ai/api/v1/batches/remote-1" || init?.method === "POST") {
+      unexpected.push(String(input)); throw new Error(`Unexpected external call: ${input}`);
+    }
+    polls++;
+    return Response.json({ id: "remote-1", status: "completed", usage: { cost: 0.125 }, results: [
+      { custom_id: "photo", response: { body: { choices: [{ message: { content: '{"title":"Recovered otter"}' } }] } } },
+      { custom_id: "failed", error: { message: "bad" } },
+      { custom_id: "blocked", error: { message: "Gemini blocked the request: SAFETY" } },
+    ] });
+  }, { preconnect: fetch.preconnect }));
+  await recoverBatchImports(f.env);
+  await describeStage(f.env, "photo"); // stale full-price fallback must not preempt the known batch
+  await pollImports(f.env);
+  await pollImports(f.env);
+  expect(polls).toBe(1);
+  expect(f.jobs).toEqual([{ type: "batch_poll" }, { type: "finish", memeId: "photo", gen: 0 }]);
+  expect(await f.env.DB.prepare("SELECT status,described,attempts,cost FROM imports WHERE id='imp'").first<Record<string, string | number>>())
+    .toEqual({ status: "failed", described: 1, attempts: 1, cost: 0.125 });
+  expect(await f.env.DB.prepare("SELECT count(*) AS n FROM transactions").first<number>("n")).toBe(1);
+  expect(await f.env.DB.prepare("SELECT count(*) AS n FROM memes WHERE status='failed'").first<number>("n")).toBe(2);
+});
+
+test("forwarded photos use regular ingest even with a stale collecting batch", async () => {
+  Object.assign(f.env, { BATCH_ENABLED: "false" });
+  await f.env.DB.exec("INSERT INTO users(id,role) VALUES(101,'admin'); INSERT INTO imports(id,user_id,status) VALUES('open',101,'collecting');");
+  const ctx = { user: { id: 101 }, lang: "en", msg: { message_id: 42, photo: [{ file_id: "tg", file_unique_id: "unique", width: 20, height: 20 }] },
+    api: { raw: { sendWidget: async () => ({ message_id: 5 }) } },
+    react: async () => { throw new Error("normal ingest should not send a batch reaction"); },
+  } as unknown as Ctx;
+  await receiveMedia(ctx, f.env);
+  expect(await f.env.DB.prepare("SELECT import_id,status_msg_id FROM memes WHERE file_id='tg'").first<{ import_id: string | null; status_msg_id: number }>())
+    .toEqual({ import_id: null, status_msg_id: 5 });
+  expect(f.jobs).toEqual([{ type: "embed", memeId: expect.any(String) }]);
 });
 
 test("startup completes while best-effort Telegram failure notice is still pending", async () => {

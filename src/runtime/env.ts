@@ -11,10 +11,12 @@ import worker from "../index";
 import { recoverBatchImports } from "../batch";
 import { validateOutboundProxyUrl } from "../outboundproxy";
 import { photoProvider } from "../photoprovider";
+import { batchEnabled } from "../batchmode";
 
 export async function createEnvironment(vars: Record<string, string | undefined> = process.env) {
   validateOutboundProxyUrl(vars.OUTBOUND_PROXY_URL);
   photoProvider(vars);
+  batchEnabled(vars);
   const telegramMode = vars.TELEGRAM_MODE ?? "polling";
   if (telegramMode !== "polling" && telegramMode !== "webhook") throw new Error("TELEGRAM_MODE must be polling or webhook");
   for (const key of ["PUBLIC_URL", "BOT_TOKEN", "ENCRYPTION_KEY", "WORKER_SECRET", "ADMIN_ID", ...(telegramMode === "webhook" ? ["WEBHOOK_SECRET", "TG_CLIENT_SECRET"] : [])]) {

@@ -145,6 +145,7 @@ const schemas = {
       key: { type: "boolean", description: "Own OpenRouter key connected." },
       models: { type: "object", additionalProperties: { type: "string" } },
       describe_tier: { type: "string", enum: ["max", "medium"] },
+      batch_enabled: { type: "boolean", description: "Whether the instance accepts new batch and ZIP imports." },
       blur_porn: { type: "boolean", description: "Porn memes are blurred in the app and sent with a spoiler by the bot." },
       billing: { type: "object", description: "Plan, balance and the AI allowance left (USD)." },
     },

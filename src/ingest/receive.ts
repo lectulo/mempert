@@ -5,6 +5,7 @@ import type { Env } from "../env";
 import { t } from "../i18n";
 import { sendSaveStatus } from "../savewidget";
 import { collectingImport } from "../batch";
+import { batchEnabled } from "../batchmode";
 import { addToPost } from "../channels";
 
 export interface NewMeme {
@@ -150,7 +151,8 @@ export async function receiveMedia(
   const db = env.DB;
   const html = { parse_mode: "HTML" } as const;
   // Batch mode collects photos only; videos and GIFs always use the normal pipeline.
-  const importId = media.kind === "photo" ? await collectingImport(db, ctx.user.id) : null;
+  const batches = batchEnabled(env);
+  const importId = media.kind === "photo" && batches ? await collectingImport(db, ctx.user.id) : null;
   const { photo, video, animation, ...meta } = msg;
   const group = link?.mediaGroupId ?? msg.media_group_id;
   if (await storageFull(db, ctx.user.id, media.file_size ?? 0)) return ctx.reply(t(ctx.lang, "storage_full"), html);
@@ -159,10 +161,10 @@ export async function receiveMedia(
     ...media,
     caption: msg.caption ?? null,
     source: link?.source ?? describeOrigin(msg.forward_origin),
-    import_id: importId,
     tg_meta: JSON.stringify(meta),
     added_via: "bot",
     ...link?.row,
+    import_id: importId,
   });
 
   if (memeId && importId) {
@@ -184,10 +186,12 @@ export async function receiveMedia(
   const postId = await addToPost(db, ctx.user.id, { memeId, mediaGroupId: group, caption: msg.caption, position: link?.position ?? msg.message_id });
   const sendStatus = () => sendSaveStatus(ctx.api, ctx.user.id, ctx.lang, msg.message_id);
   const statusId = group ? await albumStatus(db, postId, sendStatus) : await sendStatus();
-  await db
-    .prepare("UPDATE memes SET status = 'embedding', error = NULL, status_msg_id = COALESCE(?, status_msg_id), updated_at = unixepoch() WHERE id = ?")
+  const gen = await db
+    .prepare(`UPDATE memes SET status = 'embedding', error = NULL, ${batches ? "" : "import_id = NULL,"}
+      status_msg_id = COALESCE(?, status_msg_id), updated_at = unixepoch() WHERE id = ? RETURNING gen`)
     .bind(statusId, memeId)
-    .run();
+    .first<number>("gen");
+  if (gen === null) return;
   // A link import without an ffmpeg preview makes it first (src/thumb.ts).
-  await env.JOBS.send({ type: link && media.kind !== "photo" && !link.row?.r2_preview ? "thumb" : "embed", memeId });
+  await env.JOBS.send({ type: link && media.kind !== "photo" && !link.row?.r2_preview ? "thumb" : "embed", memeId, ...(gen ? { gen } : {}) });
 }

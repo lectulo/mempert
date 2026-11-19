@@ -2,6 +2,8 @@ import { botApi } from "../botapi";
 import { DEFAULT_TIER, DESCRIBE_FALLBACKS, DESCRIBE_MODELS, DESCRIBE_UNCENSORED, DESCRIBE_VIDEO_FALLBACKS, MODELS, VIDEO_INLINE_MAX_BYTES } from "../config";
 import { getMeme, getUser, setStatus, userLang, type Meme } from "../db";
 import { ALBUM_WAIT, albumMemes, albumPhotos, queuePosts } from "../channels";
+import { stopBatchDescription } from "../batch";
+import { batchEnabled } from "../batchmode";
 import type { Env } from "../env";
 import { push } from "../live";
 import { esc, t, type Lang } from "../i18n";
@@ -277,12 +279,14 @@ const fromRow = (m: Meme): Description => ({
 export async function describeStage(env: Env, memeId: string, from = 0, single = false, gen = 0) {
   const m = await getMeme(env.DB, memeId);
   if (!m || m.gen !== gen || m.status !== "describing") return;
+  if (await stopBatchDescription(env, m, from)) return;
   const edits = m.edits ? JSON.parse(m.edits) : {};
   // The user set all description fields (an edit before the meme got ready): no AI call.
   if (m.title === null && DESCRIPTION.every((k) => k in edits)) await saveDescription(env.DB, m, fromRow({ ...m, ...edits })).run();
   else if (m.title === null) {
     // Photos of a media group are described in one request: wait until the album is complete and embedded.
-    const album = m.kind === "photo" && !single ? await albumPhotos(env.DB, memeId) : [];
+    const photos = m.kind === "photo" && !single ? await albumPhotos(env.DB, memeId) : [];
+    const album = batchEnabled(env) ? photos : photos.filter((a) => !a.import_id);
     const comic = album[0]?.album_layout === "comic";
     const wait = comic ? COMIC_WAIT : ALBUM_WAIT;
     if (album.some((a) => a.status === "embedding") || (album.length && Date.now() / 1000 - album[0].album_updated < wait)) {

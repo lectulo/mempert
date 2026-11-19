@@ -4,6 +4,7 @@
 // Telegram Login's allowed URL and client secret still need configuration in BotFather.
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { batchEnabled } from "../src/batchmode";
 
 const allowedUpdates = ["message", "inline_query", "chosen_inline_result", "callback_query", "pre_checkout_query", "subscription", "my_chat_member", "widget_query"];
 
@@ -46,6 +47,7 @@ export function webhookConfig(env: NodeJS.ProcessEnv, args: string[]) {
 
 export async function setup(env: NodeJS.ProcessEnv, args: string[], request?: typeof fetch, log: (message: string) => void = console.log) {
   const mode = env.TELEGRAM_MODE || "polling";
+  const commands = batchEnabled({ BATCH_ENABLED: env.BATCH_ENABLED }) ? "including batch commands" : "without batch commands";
   if (mode !== "polling" && mode !== "webhook") throw new Error("TELEGRAM_MODE must be polling or webhook.");
   if (mode === "polling") {
     if (args.includes("--drop-pending-updates")) throw new Error("--drop-pending-updates is not allowed in polling mode; pending updates are preserved.");
@@ -61,7 +63,7 @@ export async function setup(env: NodeJS.ProcessEnv, args: string[], request?: ty
       throw new Error("PUBLIC_URL must be an HTTP(S) origin without credentials, path, query or fragment.");
     }
     if (args.includes("--dry-run")) log("Dry run: Telegram polling configuration is valid. No requests sent.");
-    log("Polling managed by app; webhook setup not required. On startup the app removes the webhook without dropping pending updates, synchronizes commands and starts long polling.");
+    log(`Polling managed by app; webhook setup not required. On startup the app removes the webhook without dropping pending updates, synchronizes menus (${commands}) and starts long polling.`);
     log("Website Telegram login still requires a public HTTPS origin and TG_CLIENT_SECRET; OpenRouter must be able to fetch signed media at PUBLIC_URL.");
     return;
   }
@@ -88,6 +90,7 @@ export async function setup(env: NodeJS.ProcessEnv, args: string[], request?: ty
     if (!response.ok || result?.ok !== true) throw new Error(`Telegram rejected webhook configuration (HTTP ${response.status}); check the bot credentials and public HTTPS endpoint.`);
     log("Telegram webhook configured successfully.");
   }
+  log(`The app synchronizes menus (${commands}) when it handles a webhook update.`);
   log(`BotFather: configure Telegram Login for your PUBLIC_URL; the login callback is ${config.loginCallback}. Set TG_CLIENT_SECRET in the server environment. Enable inline mode with /setinline if required.`);
 }
 

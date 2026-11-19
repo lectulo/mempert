@@ -29,10 +29,10 @@ export const onUploadReady = (fn: (id: string) => void) => (readyListeners.add(f
 
 const isZip = (file: File) => /\.zip$/i.test(file.name) || /zip/.test(file.type);
 
-export function addFiles(files: Iterable<File>) {
+export function addFiles(files: Iterable<File>, allowZip: boolean) {
   for (const file of files) {
     const kind = isZip(file) ? "zip" : file.type.startsWith("image/") ? "image" : file.type.startsWith("video/") ? "video" : null;
-    if (!kind) continue;
+    if (!kind || (kind === "zip" && !allowZip)) continue;
     uploads.items.push({ key: nextKey++, name: file.name, kind, progress: 0, state: "queued" });
     const item = uploads.items[uploads.items.length - 1]; // the reactive proxy
     if (kind !== "zip" && file.size > LIMITS[kind]) {

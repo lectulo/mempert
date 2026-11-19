@@ -50,14 +50,14 @@ describe("signed media URLs", () => {
 describe("batch import", () => {
   it("starts once, finishes and cancels", async () => {
     const { env: e, sent } = fakeEnv();
-    expect(await startImport(e.DB, 21)).toEqual({ created: true, count: 0 });
-    expect(await startImport(e.DB, 21)).toEqual({ created: false, count: 0 });
+    expect(await startImport(e, 21)).toEqual({ created: true, count: 0 });
+    expect(await startImport(e, 21)).toEqual({ created: false, count: 0 });
     expect(await finishImport(e, 21, 77)).toBe(true);
     expect(sent).toEqual([{ type: "batch_submit", importId: expect.any(String) }]);
     expect(await e.DB.prepare("SELECT status_msg_id FROM imports WHERE user_id = 21").first<number>("status_msg_id")).toBe(77);
     expect(await finishImport(e, 21, 78)).toBe(false);
 
-    await startImport(e.DB, 22);
+    await startImport(e, 22);
     const id = await e.DB.prepare("SELECT id FROM imports WHERE user_id = 22").first<string>("id");
     await addMeme("c1", 22, id!);
     expect(await cancelImport(e, 22)).toBe(1);

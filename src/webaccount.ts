@@ -1,5 +1,6 @@
 import { adminGrant, adminRevoke, listUsers } from "./admin";
 import { batchProgress, cancelImport, finishImportFromApp, retryFailed, startImport } from "./batch";
+import { batchEnabled } from "./batchmode";
 import { t } from "./i18n";
 import { botApi } from "./botapi";
 import type { User } from "./db";
@@ -18,7 +19,7 @@ import { oauthApi } from "./oauth";
 import { connectE621, disconnectE621, e621Status, LISTS, setE621Lists, setE621Pools, syncE621, type Lists } from "./e621";
 import { E621Error } from "./ingest/sources/e621";
 import { createToken, deleteToken, listTokens } from "./tokens";
-import { billingStatus, ownKey, starsInvoiceLink, type ProductKind } from "./billing";
+import { billingStatus, canUseAi, ownKey, starsInvoiceLink, type ProductKind } from "./billing";
 import { addChannelUrl, channelView, listChannels, removeChannel, updateChannel, type ChannelPatch } from "./channels";
 import { btcpayOn, createBtcpayInvoice, getInvoice, productUsd, usdtNetworks } from "./crypto";
 
@@ -73,6 +74,15 @@ export async function handleAccount(req: Request, env: Env, user: User, parts: s
     }
   }
 
+  // Check the feature before billing or any side effects, including the Telegram retry notification.
+  const newBatch = m === "POST" && ((resource === "batch" && (id === "start" || id === "retry")) || (resource === "zip" && !id));
+  const closeBatch = m === "POST" && resource === "batch" && (id === "finish" || id === "cancel");
+  if ((newBatch || closeBatch) && !batchEnabled(env)) return json({ error: "batch disabled" }, 403);
+  if (newBatch) {
+    const gate = await canUseAi(env.DB, user);
+    if (!gate.ok) return json({ error: "payment required", reason: gate.reason }, 402);
+  }
+
   if (resource === "batch") {
     if (m === "GET") return json(await batchProgress(env, user.id));
     if (m === "POST" && id === "retry") {
@@ -80,7 +90,7 @@ export async function handleAccount(req: Request, env: Env, user: User, parts: s
       const msg = await botApi(env.BOT_TOKEN).sendMessage(user.id, t(lang, "batch_retry_started", { photos: "…", others: "…" }), { parse_mode: "HTML" });
       return json(await retryFailed(env, user.id, msg.message_id));
     }
-    if (m === "POST" && id === "start") return json(await startImport(env.DB, user.id));
+    if (m === "POST" && id === "start") return json(await startImport(env, user.id));
     if (m === "POST" && id === "finish") return json({ ok: await finishImportFromApp(env, user.id) });
     if (m === "POST" && id === "cancel") return json({ count: await cancelImport(env, user.id) });
   }

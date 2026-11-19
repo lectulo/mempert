@@ -60,6 +60,17 @@ test("dry run makes no requests and does not print credentials", async () => {
   assert.ok(!messages.join("\n").includes(env.WEBHOOK_SECRET));
 });
 
+test("setup shows whether the app will publish batch commands", async () => {
+  for (const TELEGRAM_MODE of ["webhook", "polling"]) {
+    const noRequest = Object.assign(() => { throw new Error("must not fetch"); }, { preconnect: fetch.preconnect });
+    for (const BATCH_ENABLED of [undefined, "false"]) {
+      const messages: string[] = [];
+      await setup({ ...env, TELEGRAM_MODE, BATCH_ENABLED }, ["--dry-run"], noRequest, (message) => messages.push(message));
+      assert.match(messages.join("\n"), BATCH_ENABLED === "false" ? /without batch commands/ : /including batch commands/);
+    }
+  }
+});
+
 test("default transport is not initialized for dry run or polling info", async () => {
   const messages: string[] = [];
   const log = (message: string) => messages.push(message);

@@ -33,7 +33,8 @@ Try it now: forward a meme from any chat.`,
   start_share: "📤 Search in a chat",
   start_help: "💡 How to use",
   first_meme: `\n\n${E.help} Your first meme! Now find it: send a word from it here, or type <code>@{bot}</code> and a word in any chat.`,
-  bot_description: "I save your memes and find them later by text, meaning or mood.\n\n• Forward photos, videos and GIFs: AI reads the text and writes what each meme means.\n• Search here, in the web app, or inline in any chat.\n• Import Telegram exports, auto-post to channels, connect AI apps.\n\nPress Start and forward your first meme.",
+  bot_description: "I save your memes and find them later by text, meaning or mood.\n\n• Forward photos, videos and GIFs: AI reads the text and writes what each meme means.\n• Search here, in the web app, or inline in any chat.\n• {batch}Auto-post to channels and connect AI apps.\n\nPress Start and forward your first meme.",
+  bot_description_batch: "Import Telegram exports. ",
   bot_short_description: "Save memes and find them by text, meaning or mood. Inline search in any chat.",
   help: `${E.help} <b>How to use</b>
 Forward a photo, video or GIF to save it. Send text to search: a caption fragment, a description, a template name or a mood.
@@ -41,11 +42,7 @@ Forward a photo, video or GIF to save it. Send text to search: a caption fragmen
 /stats — your memes and AI spend
 /settings — chat search mode
 /delete — reply to a meme to remove it
-/key — use your own OpenRouter account
-/batch — cheap bulk import of photos (results in minutes to hours)
-/batch_zip — import a .zip with media or a Telegram chat export
-/batch_status — batch progress
-/batch_retry — retry failed memes
+/key — use your own OpenRouter account{batch}
 /export — download all your data as a .zip
 /delete_all — delete your account and all data
 /channels — auto-post new memes to your channels
@@ -53,6 +50,11 @@ Forward a photo, video or GIF to save it. Send text to search: a caption fragmen
 /subscribe, /balance — plan and AI balance
 /paysupport, /terms — payment support and terms
 /about — what the bot stores`,
+  help_batch: `
+/batch — cheap bulk import of photos (results in minutes to hours)
+/batch_zip — import a .zip with media or a Telegram chat export
+/batch_status — batch progress
+/batch_retry — retry failed memes`,
   help_admin: `
 <b>Admin</b>
 /grant @username|id [user|admin|paid]
@@ -61,10 +63,11 @@ Forward a photo, video or GIF to save it. Send text to search: a caption fragmen
 /stats all — spend of all users`,
   about: `${E.help} <b>memesave</b>
 <b>Storage.</b> Each meme has a permanent copy in Cloudflare R2, with its text metadata and embeddings. Temporary files (search cache, .zip uploads, export archives) are deleted after max 7 days. Your own OpenRouter key is stored encrypted.
-<b>AI.</b> Each meme gets an embedding ({embed}) and a description: photos by {image} (quality in /settings), videos and GIFs by {video}. Single memes are checked with web search; /batch does not use it. When a provider refuses a photo, a fallback model describes it. Search uses {search}.
+<b>AI.</b> Each meme gets an embedding ({embed}) and a description: photos by {image} (quality in /settings), videos and GIFs by {video}. Single memes are checked with web search{batch}. When a provider refuses a photo, a fallback model describes it. Search uses {search}.
 <b>Access.</b> Only you see your memes. An AI app connected with /mcp gets access only after your approval; you can revoke it in the app.
 Every AI request cost is saved to your /stats. /export downloads all your data, /delete_all deletes it.
 <b>Self-hosting.</b> Source code: <a href="https://github.com/cofob/memesave-bot">github.com/cofob/memesave-bot</a>. Support: @cofob.`,
+  about_batch: "; /batch does not use it",
   unknown_cmd: `${E.help} Unknown command. See /help`,
   unsupported: `${E.error} Only photos, videos and GIFs are supported.`,
   saving: `${E.indexing} Saved, indexing…`,
@@ -116,6 +119,7 @@ Average per meme: {avg}`,
   batch_started: `${E.indexing} <b>Batch mode on.</b> Forward photos, then send /batch_finish. Photos are described at half price, usually within minutes, max 24–96 h. Videos and GIFs are indexed right away as usual. /batch_cancel to stop.`,
   batch_open: `${E.indexing} Batch mode is already on: {n} photos. Send /batch_finish when done.`,
   batch_off: `${E.help} Batch mode is off. Start it with /batch.`,
+  batch_disabled: `${E.help} Batch imports are disabled on this bot.`,
   batch_empty: `${E.notFound} No photos in this batch.`,
   batch_finishing: `${E.indexing} Submitting {n} photos…`,
   batch_submitted: `${E.indexing} Batch with {n} photos submitted. I will tell you when it is done.`,
@@ -689,7 +693,8 @@ const ru: Record<Key, string> = {
   start_share: "📤 Поиск в другом чате",
   start_help: "💡 Как пользоваться",
   first_meme: `\n\n${E.help} Ваш первый мем! Теперь найдите его: отправьте сюда слово из него или напишите <code>@{bot}</code> и слово в любом чате.`,
-  bot_description: "Я сохраняю ваши мемы и нахожу их потом по тексту, смыслу или настроению.\n\n• Пересылайте фото, видео и GIF: ИИ читает текст и пишет, что значит каждый мем.\n• Ищите здесь, в веб-приложении или inline в любом чате.\n• Импорт экспортов Telegram, автопостинг в каналы, подключение ИИ-приложений.\n\nНажмите «Начать» и перешлите первый мем.",
+  bot_description: "Я сохраняю ваши мемы и нахожу их потом по тексту, смыслу или настроению.\n\n• Пересылайте фото, видео и GIF: ИИ читает текст и пишет, что значит каждый мем.\n• Ищите здесь, в веб-приложении или inline в любом чате.\n• {batch}Автопостинг в каналы и подключение ИИ-приложений.\n\nНажмите «Начать» и перешлите первый мем.",
+  bot_description_batch: "Импорт архивов из Telegram. ",
   bot_short_description: "Сохраняйте мемы и находите их по тексту, смыслу или настроению. Inline-поиск в любом чате.",
   help: `${E.help} <b>Как пользоваться</b>
 Перешлите фото, видео или GIF, чтобы сохранить. Отправьте текст для поиска: фрагмент подписи, описание, название шаблона или настроение.
@@ -697,11 +702,7 @@ const ru: Record<Key, string> = {
 /stats — ваши мемы и расходы на ИИ
 /settings — режим поиска в чате
 /delete — ответьте на мем, чтобы удалить
-/key — свой аккаунт OpenRouter
-/batch — дешёвый массовый импорт фото (результат от минут до часов)
-/batch_zip — импорт .zip с медиа или экспорта чата Telegram
-/batch_status — прогресс пакетов
-/batch_retry — повторить мемы с ошибкой
+/key — свой аккаунт OpenRouter{batch}
 /export — скачать все ваши данные в .zip
 /delete_all — удалить аккаунт и все данные
 /channels — автопостинг новых мемов в ваши каналы
@@ -709,6 +710,11 @@ const ru: Record<Key, string> = {
 /subscribe, /balance — тариф и баланс ИИ
 /paysupport, /terms — поддержка по оплате и условия
 /about — что хранит бот`,
+  help_batch: `
+/batch — дешёвый массовый импорт фото (результат от минут до часов)
+/batch_zip — импорт .zip с медиа или экспорта чата Telegram
+/batch_status — прогресс пакетов
+/batch_retry — повторить мемы с ошибкой`,
   help_admin: `
 <b>Админ</b>
 /grant @username|id [user|admin|paid]
@@ -717,10 +723,11 @@ const ru: Record<Key, string> = {
 /stats all — расходы всех пользователей`,
   about: `${E.help} <b>memesave</b>
 <b>Хранение.</b> У каждого мема есть постоянная копия в Cloudflare R2, вместе с текстовыми метаданными и эмбеддингами. Временные файлы (кэш поиска, загрузки .zip, архивы экспорта) удаляются максимум через 7 дней. Ваш собственный ключ OpenRouter хранится в зашифрованном виде.
-<b>ИИ.</b> Каждый мем получает эмбеддинг ({embed}) и описание: фото — {image} (качество в /settings), видео и GIF — {video}. Одиночные мемы проверяются веб-поиском; /batch его не использует. Если провайдер отказывается обрабатывать фото, его описывает резервная модель. Поиск использует {search}.
+<b>ИИ.</b> Каждый мем получает эмбеддинг ({embed}) и описание: фото — {image} (качество в /settings), видео и GIF — {video}. Одиночные мемы проверяются веб-поиском{batch}. Если провайдер отказывается обрабатывать фото, его описывает резервная модель. Поиск использует {search}.
 <b>Доступ.</b> Ваши мемы видите только вы. ИИ-приложение, подключённое через /mcp, получает доступ только после вашего разрешения; отозвать его можно в приложении.
 Стоимость каждого запроса к ИИ сохраняется в /stats. /export скачивает все ваши данные, /delete_all удаляет их.
 <b>Селфхостинг.</b> Исходный код: <a href="https://github.com/cofob/memesave-bot">github.com/cofob/memesave-bot</a>. Поддержка: @cofob.`,
+  about_batch: "; /batch его не использует",
   unknown_cmd: `${E.help} Неизвестная команда. См. /help`,
   unsupported: `${E.error} Поддерживаются только фото, видео и GIF.`,
   saving: `${E.indexing} Сохранено, индексирую…`,
@@ -772,6 +779,7 @@ const ru: Record<Key, string> = {
   batch_started: `${E.indexing} <b>Пакетный режим включён.</b> Пересылайте фото, затем отправьте /batch_finish. Фото описываются за полцены, обычно за минуты, максимум 24–96 ч. Видео и GIF индексируются сразу, как обычно. /batch_cancel — выключить.`,
   batch_open: `${E.indexing} Пакетный режим уже включён: {n} фото. Отправьте /batch_finish, когда закончите.`,
   batch_off: `${E.help} Пакетный режим выключен. Включите его командой /batch.`,
+  batch_disabled: `${E.help} Пакетный импорт в этом боте отключён.`,
   batch_empty: `${E.notFound} В пакете нет фото.`,
   batch_finishing: `${E.indexing} Отправляю {n} фото…`,
   batch_submitted: `${E.indexing} Пакет из {n} фото отправлен. Я напишу, когда он будет готов.`,

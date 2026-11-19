@@ -17,7 +17,7 @@ export async function adminGrant(env: Env, api: Api, actor: User, arg: string, r
   if (!target || !["user", "admin", "paid"].includes(roleArg)) return { result: "grant_usage", target: arg };
   const role = roleArg as Role;
   const id = await grant(env.DB, target, role, actor.id);
-  if (id !== null) await setCommandScope(api, id, role, null).catch(console.error);
+  if (id !== null) await setCommandScope(env, api, id, role, null).catch(console.error);
   return { result: id === null ? "granted_pending" : "granted", target: show(target) };
 }
 
@@ -30,7 +30,7 @@ export async function adminRevoke(env: Env, api: Api, actor: User, arg: string):
     ("username" in target && target.username === actor.username);
   if (self) return { result: "revoke_denied", target: show(target) };
   const { id, removed } = await revoke(env.DB, target);
-  if (id !== null) await setCommandScope(api, id, "user", null).catch(console.error);
+  if (id !== null) await setCommandScope(env, api, id, "user", null).catch(console.error);
   return { result: removed ? "revoked" : "user_not_found", target: show(target) };
 }
 

@@ -11,6 +11,8 @@ import { oauthUrl, setUserKey } from "./userkey";
 import { allStats, userStats } from "./stats";
 import { startAnalysis } from "./analysis";
 import { batchProgress, cancelImport, collectingImport, countMemes, finishImport, retryFailed, startImport } from "./batch";
+import { batchEnabled } from "./batchmode";
+import { BATCH_COMMANDS } from "./botcommands";
 import { createZipImport, setZipStatusMessage } from "./zip";
 import { isActive } from "./billing";
 import { allowAi, balanceText, subscribeCard, topupCard } from "./billingbot";
@@ -110,7 +112,10 @@ export function registerCommands<C extends Ctx>(bot: Composer<C>, env: Env) {
     }
   });
 
-  const help = (ctx: C) => ctx.reply(t(ctx.lang, "help") + (ctx.user.role === "admin" ? t(ctx.lang, "help_admin") : ""), html);
+  const help = (ctx: C) => ctx.reply(
+    t(ctx.lang, "help", { batch: batchEnabled(env) ? t(ctx.lang, "help_batch") : "" }) + (ctx.user.role === "admin" ? t(ctx.lang, "help_admin") : ""),
+    html,
+  );
   bot.command("help", help);
   bot.callbackQuery("help", async (ctx) => {
     await ctx.answerCallbackQuery();
@@ -124,7 +129,7 @@ export function registerCommands<C extends Ctx>(bot: Composer<C>, env: Env) {
 
   bot.command("about", (ctx) =>
     ctx.reply(
-      t(ctx.lang, "about", { embed: MODELS.embed, image: esc(photoModel(env, ctx.user)), video: MODELS.describeVideo, search: MODELS.search }),
+      t(ctx.lang, "about", { embed: MODELS.embed, image: esc(photoModel(env, ctx.user)), video: MODELS.describeVideo, search: MODELS.search, batch: batchEnabled(env) ? t(ctx.lang, "about_batch") : "" }),
       html,
     ),
   );
@@ -181,9 +186,12 @@ export function registerCommands<C extends Ctx>(bot: Composer<C>, env: Env) {
 
   bot.command("key", (ctx) => replyKey(ctx, env));
 
+  // Telegram may still offer commands from a cached menu or a previous message.
+  bot.command(BATCH_COMMANDS, (ctx, next) => batchEnabled(env) ? next() : ctx.reply(t(ctx.lang, "batch_disabled"), html));
+
   bot.command("batch", async (ctx) => {
     if (!(await allowAi(env, ctx))) return;
-    const { created, count } = await startImport(env.DB, ctx.user.id);
+    const { created, count } = await startImport(env, ctx.user.id);
     await ctx.reply(created ? t(ctx.lang, "batch_started") : t(ctx.lang, "batch_open", { n: count }), html);
   });
 
