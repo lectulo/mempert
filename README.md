@@ -86,7 +86,7 @@ PHOTO_MODEL=gpt-6.2-sol
 | Gemini 4 Argon | low | 3278 | 0,01219 | 17,9 |
 | Gemini 4 Argon | high | 4469 | 0,02410 | 36,6 |
 
-`medium`/`max` в настройках аккаунта — выбор модели OpenRouter, а не reasoning effort. В обычном запросе к `PHOTO_API_BASE_URL` приложение не задаёт effort: используется настройка провайдера.
+`medium`/`max` в настройках аккаунта — выбор модели OpenRouter, а не reasoning effort. Для обычных описаний через `PHOTO_API_BASE_URL` можно отдельно задать `PHOTO_REASONING_EFFORT=low` (или `medium`, `high`, если модель поддерживает). Значение передаётся в `reasoning_effort` Chat Completions; если оно пустое, поле не отправляется и уровень выбирает провайдер. При отключении стороннего провайдера также очистите `PHOTO_REASONING_EFFORT`.
 
 ### Необязательно: webhook вместо polling
 

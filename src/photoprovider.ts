@@ -4,18 +4,19 @@ import type { Env } from "./env";
 import type { AssistantMessage, ChatMessage } from "./openrouter";
 import { recordSpend, type Spend } from "./spend";
 
-type Settings = Pick<Env, "PHOTO_API_BASE_URL" | "PHOTO_API_KEY" | "PHOTO_MODEL">;
+type Settings = Pick<Env, "PHOTO_API_BASE_URL" | "PHOTO_API_KEY" | "PHOTO_MODEL" | "PHOTO_REASONING_EFFORT">;
 
 /** Instance credentials are separate from both shared and per-user OpenRouter keys. */
 export function photoProvider(vars: Settings) {
   const base = vars.PHOTO_API_BASE_URL?.trim(), key = vars.PHOTO_API_KEY?.trim(), model = vars.PHOTO_MODEL?.trim();
-  if (!base && !key && !model) return null;
+  const effort = vars.PHOTO_REASONING_EFFORT?.trim() || undefined;
+  if (!base && !key && !model && !effort) return null;
   if (!base || !key || !model) throw new Error("Set PHOTO_API_BASE_URL, PHOTO_API_KEY and PHOTO_MODEL together");
   const url = URL.canParse(base) ? new URL(base) : null;
   if (!url || !["https:", "http:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
     throw new Error("PHOTO_API_BASE_URL must be an HTTP(S) API base URL without credentials, query or fragment");
   }
-  return { endpoint: url.href.replace(/\/+$/, "") + "/chat/completions", key, model };
+  return { endpoint: url.href.replace(/\/+$/, "") + "/chat/completions", key, model, effort };
 }
 
 export function photoModel(env: Env, user: Pick<User, "openrouter_key" | "describe_tier">) {
@@ -27,7 +28,7 @@ export async function providerDescription(env: Env, provider: NonNullable<Return
   const res = await fetch(provider.endpoint, {
     method: "POST", redirect: "error", signal: AbortSignal.timeout(120_000),
     headers: { Authorization: `Bearer ${provider.key}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ model: provider.model, messages: body.messages, response_format: body.response_format }),
+    body: JSON.stringify({ model: provider.model, messages: body.messages, response_format: body.response_format, reasoning_effort: provider.effort }),
   });
   if (!res.ok) {
     await res.body?.cancel();

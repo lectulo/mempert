@@ -106,6 +106,7 @@ for (const tier of ["max", "medium"] as const) {
   for (const isAlbum of [false, true]) {
     test(`${tier}: ${isAlbum ? "album" : "single photo"} uses custom vision, then OpenRouter embeddings`, async () => {
       await f.env.DB.prepare("UPDATE users SET describe_tier = ? WHERE id = ?").bind(tier, userId).run();
+      if (isAlbum) f.env.PHOTO_REASONING_EFFORT = "low";
       if (isAlbum) await album();
       else await photo("first");
       // OpenRouter's shared transport would reject this proxy before reaching native fetch.
@@ -129,6 +130,8 @@ for (const tier of ["max", "medium"] as const) {
       expect(chat.headers.get("HTTP-Referer")).toBeNull();
       expect(chat.headers.get("X-Title")).toBeNull();
       expect(chat.body.model).toBe(photoModel);
+      if (isAlbum) expect(chat.body.reasoning_effort).toBe("low");
+      else expect(chat.body).not.toHaveProperty("reasoning_effort");
       expect(chat.body).not.toHaveProperty("tools");
       const userMessage = chat.body.messages.find((message: { role: string }) => message.role === "user");
       expect(userMessage.content.filter((part: { type: string }) => part.type === "image_url")
