@@ -1,8 +1,10 @@
 import type { Api } from "grammy";
 import { isIP } from "node:net";
+import { pipeline, Readable, type Transform } from "node:stream";
 import { connect as tlsConnect } from "node:tls";
+import { createBrotliDecompress, createInflate, createGunzip, createZstdDecompress } from "node:zlib";
 // Explicit JS entrypoint bypasses Bun's built-in undici compatibility shim.
-import { Client, ProxyAgent, Socks5ProxyAgent, fetch as proxyFetch, type Dispatcher } from "undici/index.js";
+import { Client, ProxyAgent, Socks5ProxyAgent, request as proxyRequest, type Dispatcher } from "undici/index.js";
 
 const invalidProxy = () => new Error("OUTBOUND_PROXY_URL must be an HTTP, HTTPS or SOCKS5 proxy URL");
 
@@ -58,6 +60,10 @@ function transportError(aborted: boolean) {
   return error;
 }
 
+const decoders: Record<string, () => Transform> = {
+  gzip: createGunzip, "x-gzip": createGunzip, deflate: createInflate, br: createBrotliDecompress, zstd: createZstdDecompress,
+};
+
 /** Streaming transport for Telegram/OpenRouter only. Explicit "" forces direct. */
 export async function outboundFetch(input: string | URL | Request, init?: RequestInit, proxyUrl?: string): Promise<Response> {
   const proxy = validateOutboundProxyUrl(proxyUrl ?? configuredProxy());
@@ -70,29 +76,52 @@ export async function outboundFetch(input: string | URL | Request, init?: Reques
     if (target.protocol !== "https:" || !["api.telegram.org", "oauth.telegram.org", "openrouter.ai"].includes(target.hostname) ||
       target.username || target.password || target.port && target.port !== "443") throw transportError(false);
     signal = request.signal;
-    const response = await proxyFetch(request.url, {
-      method: request.method, headers: [...request.headers.entries()], body: request.body,
-      signal: request.signal, redirect: "manual", dispatcher: proxyDispatcher(proxy), duplex: "half",
+    // undici.fetch finalizes Web streams with node:stream.finished(), which can
+    // leave a reader pending forever on Bun. request() uses a Node response body.
+    if (!request.headers.has("accept-encoding")) request.headers.set("accept-encoding", "gzip, deflate, br");
+    const { statusCode: status, statusText, headers: rawHeaders, body: source } = await proxyRequest(request.url, {
+      method: request.method as Dispatcher.HttpMethod, headers: Object.fromEntries(request.headers),
+      body: request.body ? Readable.from(request.body, { objectMode: false }) : null,
+      signal: request.signal, dispatcher: proxyDispatcher(proxy),
     });
-    // ProxyAgent rejects CONNECT errors rather than returning proxy response bodies.
-    // Do not forward API credentials or payloads through redirects either.
-    if ([301, 302, 303, 307, 308].includes(response.status) && request.redirect !== "manual") {
-      await response.body?.cancel();
+    // destroy() before a reader attaches can emit an otherwise-unhandled error.
+    source.on("error", () => {});
+    if ([301, 302, 303, 307, 308].includes(status) && request.redirect !== "manual") {
+      source.destroy();
       throw transportError(false);
     }
-    const noBody = request.method === "HEAD" || [204, 205, 304].includes(response.status);
-    if (noBody) await response.body?.cancel();
-    const reader = !noBody ? response.body?.getReader() : undefined;
-    const body = reader ? new ReadableStream<Uint8Array>({
+    const headers = new Headers();
+    for (const [name, values] of Object.entries(rawHeaders)) {
+      if (Array.isArray(values)) for (const value of values) headers.append(name, value);
+      else if (values !== undefined) headers.set(name, values);
+    }
+    if (request.method === "HEAD" || [204, 205, 304].includes(status)) {
+      source.resume();
+      return new Response(null, { status, statusText, headers });
+    }
+    // request() returns wire bytes. Decode known encodings in reverse order;
+    // pipeline propagates decoder errors and cancellation to the source.
+    let decoded: Readable = source;
+    const encodings = headers.get("content-encoding")?.toLowerCase().split(",").map(s => s.trim());
+    if (encodings && encodings.length > 5) { source.destroy(); throw transportError(false); }
+    if (encodings?.every(e => Object.hasOwn(decoders, e))) {
+      const transforms = encodings.reverse().map(e => decoders[e]());
+      pipeline([source, ...transforms], () => {});
+      decoded = transforms[transforms.length - 1];
+      headers.delete("content-encoding");
+      headers.delete("content-length");
+    }
+    const iterator = decoded[Symbol.asyncIterator]();
+    const body = new ReadableStream<Uint8Array>({
       async pull(controller) {
         try {
-          const { done, value } = await reader.read();
+          const { done, value } = await iterator.next();
           if (done) controller.close(); else controller.enqueue(value);
         } catch { controller.error(transportError(!!signal?.aborted)); }
       },
-      cancel() { return reader.cancel().catch(() => {}); },
-    }) : null;
-    return new Response(body, { status: response.status, statusText: response.statusText, headers: [...response.headers.entries()] });
+      cancel() { decoded.destroy(); source.destroy(); },
+    });
+    return new Response(body, { status, statusText, headers });
   } catch { throw transportError(!!signal?.aborted); }
 }
 

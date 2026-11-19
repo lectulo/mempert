@@ -6,6 +6,7 @@ import https from "node:https";
 import net from "node:net";
 import { connect as tlsConnect } from "node:tls";
 import { once } from "node:events";
+import { gzipSync } from "node:zlib";
 import { Bot, InputFile } from "grammy";
 import { SocksClient } from "socks";
 import { SocksProxyAgent } from "socks-proxy-agent";
@@ -24,6 +25,19 @@ assert.equal(routes.exitCode, 0);
 assert.equal(routes.stdout.toString().trim(), "", "fixture must have no external routes");
 const tls = { key: readFileSync(`${directory}/key.pem`), cert: readFileSync(`${directory}/cert.pem`) };
 const bytes = Buffer.from([0, 255, 128, 13, 10, 0, 42]);
+const streamPath = "/api/v1/fixture/binary-stream";
+const abortStreamPath = "/api/v1/fixture/abort-stream";
+const streamBytes = Buffer.alloc(512 * 1024);
+// Deterministic high-entropy data keeps the gzip variant large on the wire too.
+let word = 0x12345678;
+for (let offset = 0; offset < streamBytes.length; offset += 4) {
+  word ^= word << 13;
+  word ^= word >>> 17;
+  word ^= word << 5;
+  streamBytes.writeUInt32LE(word >>> 0, offset);
+}
+let sendStreamTail: (() => void) | undefined;
+let abortedStreamClosed: Promise<void[]> | undefined;
 const username = "user@name", password = "p:a/ss%word";
 const authorities: string[] = [], authentications: string[] = [];
 const requests: { path: string; body: Buffer; headers: http.IncomingHttpHeaders }[] = [];
@@ -89,6 +103,27 @@ const origin = https.createServer(tls, async (req, res) => {
     res.setHeader("content-type", "application/json");
     res.end(JSON.stringify({ ok: true, result: { message_id: 1, date: 1, chat: { id: 1, type: "private" }, photo: [] } }));
     return;
+  }
+  if (req.url === streamPath) {
+    const gzip = req.headers["accept-encoding"] === "gzip";
+    const wire = gzip ? gzipSync(streamBytes) : streamBytes;
+    const split = Math.floor(wire.length / 2);
+    sendStreamTail = () => {
+      sendStreamTail = undefined;
+      res.end(wire.subarray(split));
+    };
+    res.writeHead(200, { "content-type": "application/octet-stream", ...(gzip ? { "content-encoding": "gzip" } : {}) });
+    res.write(wire.subarray(0, split));
+    return;
+  }
+  if (req.url === abortStreamPath) {
+    const tunnel = tunnels.get(req.socket.remotePort!);
+    assert(tunnel, "OpenRouter stream must map to its actual proxy tunnel");
+    abortedStreamClosed = Promise.all([tunnel.client, tunnel.upstream].map(socket =>
+      new Promise<void>(resolve => { socket.once("close", () => resolve()); })));
+    res.writeHead(200, { "content-type": "application/octet-stream" });
+    res.write(bytes);
+    return; // Never finish; only client cancellation can close this response.
   }
   res.writeHead(200, { "content-type": "application/octet-stream", "x-fixture": "telegram" });
   res.write(bytes.subarray(0, 3));
@@ -306,6 +341,39 @@ try {
         assert.match(String((error as { error?: unknown }).error), /getUpdates.*timed out after 0\.15 seconds/i);
         return true;
       });
+      for (const encoding of ["identity", "gzip"]) {
+        phase = `OpenRouter ${encoding} stream headers`;
+        const response = await outboundFetch(`https://openrouter.ai${streamPath}`, { headers: { "accept-encoding": encoding } });
+        assert.equal(response.status, 200);
+        assert.equal(requests.at(-1)?.headers["accept-encoding"], encoding);
+        assert(response.body);
+        const reader = response.body.getReader();
+        phase = `OpenRouter ${encoding} first body bytes before origin sends the tail`;
+        const first = await reader.read();
+        assert(!first.done && first.value.byteLength > 0);
+        const chunks = [Buffer.from(first.value)];
+        // The first read, not a timer, lets the origin send its second part.
+        assert(sendStreamTail);
+        sendStreamTail();
+        phase = `OpenRouter ${encoding} remaining body through EOF`;
+        for (;;) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          chunks.push(Buffer.from(chunk.value));
+        }
+        assert.deepEqual(Buffer.concat(chunks), streamBytes);
+      }
+      phase = "OpenRouter abortable stream headers";
+      const streamController = new AbortController();
+      const abortable = await outboundFetch(`https://openrouter.ai${abortStreamPath}`, { signal: streamController.signal });
+      assert.equal(abortable.status, 200);
+      assert(abortedStreamClosed);
+      phase = "OpenRouter abort rejects body read after headers";
+      const body = abortable.arrayBuffer();
+      streamController.abort();
+      await assert.rejects(body, error => (error as Error).name === "AbortError");
+      phase = "OpenRouter aborted stream closes both tunnel peers";
+      await abortedStreamClosed;
       assert(authorities.length >= 4);
       assert(authorities.includes("api.telegram.org:443"));
       assert(authorities.includes("openrouter.ai:443"));

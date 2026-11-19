@@ -19,7 +19,8 @@ the suite.
 Contracts cover HTTP CONNECT, HTTPS CONNECT (TLS to proxy), SOCKS5 remote DNS,
 optional percent-encoded credentials, binary request/response preservation,
 grammY getMe/multipart sendPhoto/long-poll cancellation and timeout, OpenRouter
-JSON and OAuth-code POSTs, unset/blank direct mode, credential-safe errors, and
+JSON and OAuth-code POSTs, multi-chunk identity/gzip bodies, cancellation after
+headers, unset/blank direct mode, credential-safe errors, and
 unrelated native fetch isolation. Proxies assert actual destination handshakes;
 the origin checks application headers separately from proxy authentication.
 
