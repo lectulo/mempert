@@ -1,0 +1,11 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "policies": [
+    { "action": "tool.use", "resource": "read:.env", "effect": "deny" },
+    { "action": "tool.use", "resource": "read:*/.env", "effect": "deny" },
+    { "action": "tool.use", "resource": "read:.env.*", "effect": "deny" },
+    { "action": "tool.use", "resource": "read:*/.env.*", "effect": "deny" },
+    { "action": "tool.use", "resource": "read:.env.example", "effect": "allow" },
+    { "action": "tool.use", "resource": "read:*/.env.example", "effect": "allow" }
+  ]
+}
