@@ -1,11 +1,12 @@
 import { Buffer } from "node:buffer";
-import { ImageResponse } from "workers-og";
+import { createRequire } from "node:module";
+import { resolve } from "node:path";
 import { albumZip } from "./albumzip";
 import { albumMemes } from "./channels";
 import type { Meme } from "./db";
 import type { Env } from "./env";
 import { esc, langOf, t, type Key, type Lang } from "./i18n";
-import { cachedMedia, extOf, memeMedia, toDataUrl } from "./media";
+import { cachedMedia, extOf, memeMedia, mediaResponse, toDataUrl } from "./media";
 import { CSS } from "./uploadpage";
 import { fileFits } from "./webapp";
 
@@ -40,8 +41,9 @@ export async function handleShare(req: Request, env: Env, ctx: ExecutionContext)
   if (kind === "page") return page(env, meme, langOf({ language_code: req.headers.get("Accept-Language") ?? undefined }), await comicPages(env, meme));
   return cachedMedia(req, ctx, async () => {
     if (kind === "og") return ogImage(env, meme);
-    const media = await memeMedia(env, meme, "file").catch(() => null);
-    return media && new Response(media.bytes, { headers: { "Content-Type": media.mime, ...(meme.porn ? { "X-Robots-Tag": "noindex" } : {}) } });
+    const response = await mediaResponse(env, meme, "file", req).catch(() => null);
+    if (response && meme.porn) response.headers.set("X-Robots-Tag", "noindex");
+    return response;
   }, kind === "og" ? 86400 : 3600);
 }
 
@@ -148,56 +150,62 @@ function page(env: Env, m: Meme, lang: Lang, pages: Meme[] = []) {
   return new Response(html, { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
 }
 
-const FONT = "https://cdn.jsdelivr.net/npm/@fontsource/manrope@5.2.8/files/manrope";
-type Font = { name: string; data: ArrayBuffer; weight: 400 | 700; style: "normal" };
-let fonts: Promise<Font[]> | undefined;
-/** Manrope (the design system font) as woff: satori cannot read woff2. Loaded once per isolate. */
-const loadFonts = () =>
-  (fonts ??= Promise.all(
-    (["latin", "cyrillic"] as const).flatMap((subset) =>
-      ([400, 700] as const).map(async (weight): Promise<Font> => {
-        const res = await fetch(`${FONT}-${subset}-${weight}-normal.woff`, { cf: { cacheEverything: true, cacheTtl: 30 * 86400 } });
-        if (!res.ok) throw new Error(`font ${res.status}`);
-        return { name: `Manrope-${subset}`, data: await res.arrayBuffer(), weight, style: "normal" };
-      }),
-    ),
-  ).catch((e) => {
-    fonts = undefined;
-    throw e;
-  }));
+// Keep the native package external to Bun's server bundle: its platform .node file
+// is resolved from node_modules at runtime, not embedded as Workers WASM.
+const requireNative = createRequire(import.meta.url);
+const xml = (s: string) => s.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[c]!);
 
-type Node = { type: string; props: Record<string, unknown> };
-const h = (type: string, style: Record<string, unknown>, children?: unknown, props: Record<string, unknown> = {}): Node => ({
-  type,
-  props: { style, children, ...props },
-});
+/** Conservative line wrapping for the fixed-size preview card (Latin and Cyrillic). */
+function titleLines(title: string) {
+  const words = title.replace(/\s+/g, " ").trim().match(/\S{1,17}/gu) ?? [];
+  const lines: string[] = [];
+  let line = "";
+  for (const word of words) {
+    if (line && line.length + word.length + 1 > 17) { lines.push(line); line = ""; }
+    line += (line ? " " : "") + word;
+  }
+  if (line) lines.push(line);
+  return lines.slice(0, 4).map((line, i) => i === 3 && lines.length > 4 ? line.slice(0, 16) + "…" : line);
+}
+
+/** A real PNG response using native resvg; exported for offline renderer checks. */
+export function renderOgCard(title: string, tags: string[], host: string, src: string | null, fallback: string) {
+  const { Resvg } = requireNative("@resvg/resvg-js") as typeof import("@resvg/resvg-js");
+  const lines = titleLines(title);
+  let x = 630, y = 100 + lines.length * 64;
+  const badges = tags.slice(0, 4).map(tag => {
+    const label = "#" + tag.slice(0, 27), width = Math.min(522, label.length * 17 + 36);
+    if (x + width > 1152) { x = 630; y += 55; }
+    if (y > 460) return "";
+    const badge = `<rect x="${x}" y="${y}" width="${width}" height="42" rx="21" fill="#082f49"/><text x="${x + 18}" y="${y + 29}" font-size="26" fill="#38bdf8">${xml(label)}</text>`;
+    x += width + 12;
+    return badge;
+  }).join("");
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1200" height="630" viewBox="0 0 1200 630">
+    <defs><clipPath id="preview"><rect x="48" y="48" width="534" height="534" rx="24"/></clipPath><clipPath id="details"><rect x="630" y="48" width="522" height="534"/></clipPath></defs>
+    <rect width="1200" height="630" fill="#18181b"/>
+    <rect x="48" y="48" width="534" height="534" rx="24" fill="#09090b" stroke="#3f3f46"/>
+    <g font-family="Manrope" fill="#e4e4e7">
+      ${src ? `<image x="48" y="48" width="534" height="534" preserveAspectRatio="xMidYMid meet" clip-path="url(#preview)" xlink:href="${xml(src)}"/>` : `<text x="315" y="330" text-anchor="middle" font-size="40" fill="#a1a1aa">${xml(fallback)}</text>`}
+      <g clip-path="url(#details)">
+        ${lines.map((line, i) => `<text x="630" y="${100 + i * 64}" font-size="56" font-weight="700">${xml(line)}</text>`).join("")}
+        ${badges}
+        <text x="630" y="538" font-size="40" font-weight="700" fill="#38bdf8">memereserve</text>
+        <text x="630" y="578" font-size="26" fill="#a1a1aa">${xml(host)}</text>
+      </g>
+    </g>
+  </svg>`;
+  const png = new Resvg(svg, { font: { loadSystemFonts: false, defaultFontFamily: "Manrope", fontFiles: [
+    resolve("analyze/fonts/Manrope-Medium.ttf"), resolve("analyze/fonts/Manrope-Bold.ttf"),
+  ] } }).render().asPng();
+  return new Response(Uint8Array.from(png), { headers: { "Content-Type": "image/png" } });
+}
 
 /** 1200×630 preview card in the memereserve design (dark design-system tokens). */
 async function ogImage(env: Env, m: Meme) {
   const preview = await memeMedia(env, m, "preview").catch(() => null);
-  const src = preview && /^image\/(jpeg|png)$/.test(preview.mime) ? toDataUrl(preview) : null; // satori reads only jpeg and png
+  const src = preview && /^image\/(jpeg|png)$/.test(preview.mime) ? toDataUrl(preview) : null;
   const tags = (m.tags ?? "").split("\n").filter(Boolean).slice(0, 4);
   const title = titleOf(m, "en");
-  const card = h("div", { display: "flex", width: 1200, height: 630, padding: 48, gap: 48, background: "#18181b", color: "#e4e4e7", fontFamily: "Manrope-latin, Manrope-cyrillic" }, [
-    h(
-      "div",
-      { display: "flex", width: 534, height: 534, borderRadius: 24, background: "#09090b", border: "1px solid #3f3f46", alignItems: "center", justifyContent: "center", overflow: "hidden" },
-      src ? h("img", { width: 534, height: 534, objectFit: "contain" }, undefined, { src, width: 534, height: 534 }) : h("div", { fontSize: 40, color: "#a1a1aa" }, t("en", `share_${m.kind}`)),
-    ),
-    h("div", { display: "flex", flexDirection: "column", flex: 1, justifyContent: "space-between" }, [
-      h("div", { display: "flex", flexDirection: "column", gap: 24 }, [
-        h("div", { display: "block", fontSize: 56, fontWeight: 700, lineHeight: 1.15, lineClamp: 4 }, title.length > 120 ? `${title.slice(0, 119)}…` : title),
-        h(
-          "div",
-          { display: "flex", flexWrap: "wrap", gap: 12 },
-          tags.map((tag) => h("div", { display: "flex", padding: "8px 18px", borderRadius: 999, background: "#082f49", color: "#38bdf8", fontSize: 26 }, `#${tag}`)),
-        ),
-      ]),
-      h("div", { display: "flex", flexDirection: "column", gap: 4 }, [
-        h("div", { fontSize: 40, fontWeight: 700, color: "#38bdf8" }, "memereserve"),
-        h("div", { fontSize: 26, color: "#a1a1aa" }, new URL(env.PUBLIC_URL).host),
-      ]),
-    ]),
-  ]);
-  return new ImageResponse(card as never, { width: 1200, height: 630, fonts: await loadFonts() });
+  return renderOgCard(title, tags, new URL(env.PUBLIC_URL).host, src, t("en", `share_${m.kind}`));
 }

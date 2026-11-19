@@ -23,7 +23,8 @@ export const oauthOptions = (env: Env, defaultHandler: ExportedHandler<Env> = no
   clientRegistrationEndpoint: "/oauth/register",
   scopesSupported: SCOPES,
   requiredScopes: SCOPES, // clients ask for both; the user can turn off write access
-  clientIdMetadataDocumentEnabled: true,
+  // Bun has no Workers strictly-public fetch guard. DCR remains available; never fake that flag.
+  clientIdMetadataDocumentEnabled: false,
   resourceMetadata: { resource: `${base(env)}/mcp`, resource_name: "Memesave" },
   accessTokenTTL: 3600,
   refreshTokenTTL: 30 * DAY,

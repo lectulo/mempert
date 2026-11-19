@@ -1,23 +1,24 @@
 import type { Job } from "./queue";
 import type { UploadJob } from "./search/tgupload";
-import type { ZipImporter } from "./zip";
-import type { DataExporter } from "./export";
-import type { Thumbnailer } from "./thumb";
-import type { Analyzer } from "./analysis";
-import type { Live } from "./live";
+import type { JobNamespace } from "./job";
+import type { ThumbNamespace } from "./thumb";
 
 export interface Env {
   DB: D1Database;
   VECTORS: Vectorize;
-  MEDIA: R2Bucket; // permanent copies of all media; "tmp/" expires after 7 days
+  MEDIA: R2Bucket; // filesystem in the local runtime; "tmp/" expires after 7 days
   JOBS: Queue<Job>;
   UPLOADS: Queue<UploadJob>; // silent uploads of memes without a Telegram file id (src/search/tgupload.ts)
   OAUTH_KV: KVNamespace; // MCP OAuth grants and tokens
-  ZIP: DurableObjectNamespace<ZipImporter>;
-  EXPORT: DurableObjectNamespace<DataExporter>;
-  THUMB: DurableObjectNamespace<Thumbnailer>;
-  ANALYZE: DurableObjectNamespace<Analyzer>;
-  LIVE: DurableObjectNamespace<Live>; // push events to the web app (src/live.ts)
+  ZIP: JobNamespace;
+  EXPORT: JobNamespace;
+  THUMB: ThumbNamespace;
+  ANALYZE: JobNamespace;
+  LIVE: import("./live").LiveHub;
+  INTERNAL_URL: string;
+  WORKER_SECRET: string;
+  THUMB_URL: string;
+  SELF_HOSTED?: string;
   ADMIN_ID: string;
   STORAGE_CHAT_ID?: string; // system channel for silent uploads (the bot is its admin)
   PUBLIC_URL: string; // base URL of this Worker, e.g. https://memereserve.cfb.wtf
@@ -27,6 +28,7 @@ export interface Env {
   R2_ACCESS_KEY_ID?: string; // secret: R2 API token with read access to R2_BUCKET
   R2_SECRET_ACCESS_KEY?: string; // secret
   BOT_TOKEN: string;
+  TELEGRAM_MODE?: "polling" | "webhook"; // local runtime defaults to polling
   OUTBOUND_PROXY_URL?: string; // Telegram/OpenRouter HTTP(S)/SOCKS5 proxy; empty means direct
   WEBHOOK_SECRET: string;
   OPENROUTER_API_KEY: string;

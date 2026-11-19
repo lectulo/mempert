@@ -109,6 +109,7 @@ export async function handleBatch(batch: MessageBatch<Job>, env: Env) {
         // Search must not repeat: a partial answer may already be sent.
         if (msg.body.type === "search" || msg.attempts >= (busy ? MAX_BUSY_ATTEMPTS : MAX_JOB_ATTEMPTS)) {
           await fail(env, msg.body, e).catch(console.error);
+          (msg as typeof msg & { deadLetter?: (error: unknown) => void }).deadLetter?.(e);
           msg.ack();
         } else {
           msg.retry({ delaySeconds: retryDelay(msg.attempts, busy) });

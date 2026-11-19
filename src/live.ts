@@ -1,48 +1,37 @@
-import { DurableObject } from "cloudflare:workers";
+import type { ServerWebSocket } from "bun";
 import type { Meme } from "./db";
 import type { Env } from "./env";
 import { verifyQuery } from "./media";
 
-/** Push events to the open web app / Mini App tabs of a user. */
 export type LiveEvent =
   | { t: "meme"; id: string; status: Meme["status"]; title?: string | null }
   | { t: "job"; kind: "zip" | "export" | "batch" | "analysis" | "e621" };
+export type LiveSocketData = { userId: string };
 
-/** One instance per user: the browser WebSockets of the user (hibernation API, so no cost while idle). */
-export class Live extends DurableObject<Env> {
-  constructor(ctx: DurableObjectState, env: Env) {
-    super(ctx, env);
-    ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong")); // keepalive without a wake-up
+/** One process, at most ten users: no broker or persistent socket state needed. */
+export class LiveHub {
+  private sockets = new Set<ServerWebSocket<LiveSocketData>>();
+  open(ws: ServerWebSocket<LiveSocketData>) { this.sockets.add(ws); }
+  close(ws: ServerWebSocket<LiveSocketData>) { this.sockets.delete(ws); }
+  send(userId: string, message: string) {
+    for (const ws of this.sockets) if (ws.data.userId === userId) {
+      try { ws.send(message); } catch { this.sockets.delete(ws); }
+    }
   }
-
-  async fetch() {
-    const [client, server] = Object.values(new WebSocketPair());
-    this.ctx.acceptWebSocket(server);
-    return new Response(null, { status: 101, webSocket: client });
-  }
-
-  send(msg: string) {
-    for (const ws of this.ctx.getWebSockets())
-      try {
-        ws.send(msg);
-      } catch {
-        // a closing socket
-      }
-  }
-
-  webSocketClose(ws: WebSocket, code: number) {
-    ws.close(code);
-  }
+  stop() { for (const ws of this.sockets) ws.close(1001, "Server shutting down"); this.sockets.clear(); }
 }
 
-/** Sends the event to the user's open tabs; never throws. */
-export const push = (env: Env, userId: number, e: LiveEvent) =>
-  env.LIVE.get(env.LIVE.idFromName(String(userId))).send(JSON.stringify(e)).catch(() => {});
+export const push = async (env: Env, userId: number, e: LiveEvent) => {
+  try { env.LIVE.send(String(userId), JSON.stringify(e)); } catch { /* notifications are best effort */ }
+};
 
-/** GET /app/live/<user id>?e=&s= — the WebSocket of a signed ticket (GET /app/api/live). */
-export async function handleLive(req: Request, env: Env, url: URL) {
+export async function liveUser(req: Request, env: Env, url = new URL(req.url)) {
   const id = url.pathname.split("/")[3] ?? "";
-  if (!/^\d+$/.test(id) || !(await verifyQuery(env, `live|${id}`, url))) return new Response("Forbidden", { status: 403 });
-  if (req.headers.get("Upgrade") !== "websocket") return new Response("Upgrade Required", { status: 426 });
-  return env.LIVE.get(env.LIVE.idFromName(id)).fetch(req);
+  return /^\d+$/.test(id) && await verifyQuery(env, `live|${id}`, url) ? id : null;
+}
+
+/** The actual upgrade is performed by Bun.serve, after checking the same signed ticket. */
+export async function handleLive(req: Request, env: Env, url: URL) {
+  if (!await liveUser(req, env, url)) return new Response("Forbidden", { status: 403 });
+  return new Response("Upgrade Required", { status: 426 });
 }

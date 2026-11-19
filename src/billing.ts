@@ -12,6 +12,10 @@ const DAY = 86400;
 const MONTH = 30 * DAY;
 const now = () => Math.floor(Date.now() / 1000);
 
+/** Bun deployment flag; an explicit Env also works in the legacy Worker runtime. */
+export const selfHosted = (env?: Pick<Env, "SELF_HOSTED">) =>
+  ["true", "1"].includes(String(env?.SELF_HOSTED ?? (typeof process !== "undefined" ? process.env.SELF_HOSTED : "")));
+
 export type PlanKind = keyof typeof PLANS;
 export type ProductKind = PlanKind | "topup";
 export type Method = "stars" | "btcpay";
@@ -47,8 +51,8 @@ export async function allowanceLeft(db: D1Database, u: User, at = now()) {
 
 export async function billingStatus(env: Env, u: User) {
   return {
-    free: isFree(u),
-    active: isFree(u) || isActive(u),
+    free: selfHosted(env) || isFree(u),
+    active: selfHosted(env) || isFree(u) || isActive(u),
     plan: u.plan,
     byok: isActive(u) && !hasAllowance(u),
     ownKey: ownKey(u),
@@ -70,7 +74,7 @@ export type Gate = { ok: true } | { ok: false; reason: "subscribe" | "credit" };
 
 /** Whether new AI work may start: free roles always; paid users need an active plan and some way to pay. */
 export async function canUseAi(db: D1Database, u: User): Promise<Gate> {
-  if (isFree(u)) return { ok: true };
+  if (selfHosted() || isFree(u)) return { ok: true };
   if (!isActive(u)) return { ok: false, reason: "subscribe" };
   if (ownKey(u) || u.balance > 0 || (await allowanceLeft(db, u)) > 0) return { ok: true };
   return { ok: false, reason: "credit" };
@@ -81,6 +85,7 @@ export async function canUseAi(db: D1Database, u: User): Promise<Gate> {
  * Returns the parts and the balance-deduction statement for the caller's batch.
  */
 export async function splitCost(db: D1Database, u: User, cost: number) {
+  if (selfHosted()) return { fromAllowance: 0, fromBalance: 0 };
   const fromAllowance = Math.min(cost, await allowanceLeft(db, u));
   const fromBalance = cost - fromAllowance;
   return { fromAllowance, fromBalance };
@@ -152,6 +157,7 @@ export const topupButton = (lang: Lang): InlineKeyboardButton => ({ text: t(lang
 
 /** Notices after a spend: 80% / all of the month's included spend, low / empty balance. */
 export async function spendNotices(env: Env, before: User, fromAllowance: number, fromBalance: number) {
+  if (selfHosted(env)) return;
   const lang = langOfUser(before);
   if (fromAllowance > 0) {
     const left = await allowanceLeft(env.DB, before);
@@ -176,6 +182,7 @@ export async function spendNotices(env: Env, before: User, fromAllowance: number
 
 /** Cron: upcoming renewals and expiries, and ended subscriptions (each notice once per period). */
 export async function billingNotices(env: Env, at = now()) {
+  if (selfHosted(env)) return;
   const { results } = await env.DB.prepare(
     "SELECT * FROM users WHERE role = 'paid' AND paid_until IS NOT NULL AND paid_until BETWEEN ? AND ?",
   )

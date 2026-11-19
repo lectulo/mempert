@@ -114,7 +114,7 @@ export async function signedQuery(env: Env, scope: string, ttlSeconds: number) {
 
 /**
  * Media behind a signed URL never changes, so it is cached until the URL expires: by the browser,
- * by Telegram and by Cloudflare's edge cache (repeat requests skip R2 and Telegram).
+ * by Telegram and by browser caches. The server does not keep another in-memory media copy.
  */
 export async function cachedMedia(
   req: Request,
@@ -122,12 +122,27 @@ export async function cachedMedia(
   load: () => Promise<Response | null>,
   maxAge = Math.max(0, Number(new URL(req.url).searchParams.get("e")) - Math.floor(Date.now() / 1000)),
 ): Promise<Response> {
-  const hit = await caches.default.match(req);
-  if (hit) return hit;
   const res = await load();
   if (!res) return new Response("Not found", { status: 404 });
   res.headers.set("Cache-Control", `public, max-age=${maxAge}, immutable`);
-  ctx.waitUntil(caches.default.put(req, res.clone()));
+  res.headers.set("Accept-Ranges", "bytes");
+  const range = req.headers.get("Range");
+  if (range && res.status === 200) {
+    const bytes = await res.arrayBuffer(), size = bytes.byteLength;
+    const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+    let start = 0, end = size - 1;
+    if (match && (match[1] || match[2])) {
+      if (!match[1]) start = Math.max(0, size - Number(match[2]));
+      else { start = Number(match[1]); if (match[2]) end = Math.min(end, Number(match[2])); }
+    }
+    if (!match || (!match[1] && !match[2]) || !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start > end || start >= size) {
+      return new Response(null, { status: 416, headers: { "Content-Range": `bytes */${size}`, "Accept-Ranges": "bytes" } });
+    }
+    const headers = new Headers(res.headers);
+    headers.set("Content-Range", `bytes ${start}-${end}/${size}`);
+    headers.set("Content-Length", String(end - start + 1));
+    return new Response(bytes.slice(start, end + 1), { status: 206, headers });
+  }
   return res;
 }
 
@@ -147,6 +162,37 @@ export async function signedMediaUrl(env: Env, m: MediaMeme, variant: Variant, t
 }
 
 /** GET /media/<memeId>.<file|preview>.<ext>?e=&s= — the meme's media from R2 (back-filled from Telegram when needed). */
+/** Streams local objects, including a bounded single byte range. Telegram-only files are backfilled once. */
+export async function mediaResponse(env: Env, m: MediaMeme, variant: Variant, req?: Request): Promise<Response | null> {
+  const v = variantOf(m, variant);
+  let key = v === "preview" ? m.r2_preview : m.r2_file;
+  let info = key ? await env.MEDIA.head(key) : null;
+  if (!info) {
+    await memeMedia(env, m, v);
+    const row = await env.DB.prepare("SELECT r2_file,r2_preview FROM memes WHERE id=?").bind(m.id).first<{r2_file:string|null;r2_preview:string|null}>();
+    key = (v === "preview" ? row?.r2_preview : row?.r2_file) ?? null;
+    info = key ? await env.MEDIA.head(key) : null;
+  }
+  if (!key || !info) return null;
+  const headers = new Headers({ "Content-Type": info.httpMetadata?.contentType ?? fallbackMime(m, v), "Accept-Ranges": "bytes", "Content-Length": String(info.size) });
+  let range: {offset:number;length:number} | undefined;
+  const requested = req?.headers.get("Range");
+  if (requested) {
+    const match = /^bytes=(\d*)-(\d*)$/.exec(requested);
+    const start = match?.[1] ? Number(match[1]) : Math.max(0, info.size - Number(match?.[2]));
+    const end = match?.[1] && match[2] ? Math.min(info.size - 1, Number(match[2])) : info.size - 1;
+    if (!match || (!match[1] && !match[2]) || !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start > end || start >= info.size) {
+      headers.set("Content-Range", `bytes */${info.size}`); headers.delete("Content-Length");
+      return new Response(null, {status:416,headers});
+    }
+    range = {offset:start,length:end-start+1};
+    headers.set("Content-Range", `bytes ${start}-${end}/${info.size}`); headers.set("Content-Length", String(range.length));
+  }
+  if (req?.method === "HEAD") return new Response(null, {status:range ? 206 : 200,headers});
+  const object = await env.MEDIA.get(key, range ? {range} : undefined);
+  return object && new Response(object.body, {status:range ? 206 : 200,headers});
+}
+
 export async function serveMedia(req: Request, env: Env, ctx: ExecutionContext) {
   const url = new URL(req.url);
   const [id = "", variant = ""] = (url.pathname.split("/")[2] ?? "").split(".");
@@ -156,7 +202,6 @@ export async function serveMedia(req: Request, env: Env, ctx: ExecutionContext) 
   return cachedMedia(req, ctx, async () => {
     const m = await env.DB.prepare("SELECT * FROM memes WHERE id = ?").bind(id).first<Meme>();
     if (!m) return null;
-    const media = await memeMedia(env, m, variant).catch(() => null);
-    return media && new Response(media.bytes, { headers: { "Content-Type": media.mime } });
+    return mediaResponse(env, m, variant, req).catch(() => null);
   });
 }

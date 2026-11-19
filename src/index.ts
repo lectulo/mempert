@@ -22,12 +22,7 @@ import { handleBtcpay } from "./crypto";
 import { expireZipUploads, handleUpload, handleZipCallback } from "./zip";
 import { handleShare } from "./share";
 import { handleUploads, queueUploads, type UploadJob } from "./search/tgupload";
-
-export { ZipImporter } from "./zip";
-export { DataExporter } from "./export";
-export { Thumbnailer } from "./thumb";
-export { Analyzer } from "./analysis";
-export { Live } from "./live";
+import { flushBatchContinuations } from "./batch";
 
 let handler: ((req: Request) => Promise<Response>) | undefined;
 let synced: Promise<unknown> | undefined;
@@ -56,6 +51,7 @@ const app = {
       return new Response("OK");
     }
     if (req.method !== "POST" || url.pathname !== "/webhook") return new Response("Not found", { status: 404 });
+    if (env.TELEGRAM_MODE === "polling") return new Response("Webhook disabled", { status: 404 });
     if (req.headers.get("X-Telegram-Bot-Api-Secret-Token") !== env.WEBHOOK_SECRET) {
       return new Response("Unauthorized", { status: 401 });
     }
@@ -64,8 +60,8 @@ const app = {
       console.error("command sync failed", e);
     });
     ctx.waitUntil(synced);
-    handler ??= webhookCallback(createBot(env), "cloudflare-mod", { timeoutMilliseconds: 55_000, onTimeout: "return" });
-    return handler(req);
+    handler ??= webhookCallback(createBot(env), "cloudflare-mod", { timeoutMilliseconds: 55_000, onTimeout: "return" }) as unknown as NonNullable<typeof handler>;
+    return handler!(req);
   },
 } satisfies ExportedHandler<Env>;
 
@@ -74,6 +70,7 @@ export default {
   queue: (batch, env) =>
     batch.queue === "memesave-tgupload" ? handleUploads(batch as unknown as MessageBatch<UploadJob>, env) : handleBatch(batch, env),
   async scheduled(_, env) {
+    await flushBatchContinuations(env);
     await expireZipUploads(env.DB);
     await expireExports(env.DB);
     await expireAnalyses(env.DB);

@@ -16,6 +16,6 @@ export async function presignedR2Url(env: Env, key: string, ttlSeconds: number):
   const path = key.split("/").map(encodeURIComponent).join("/");
   const url = new URL(`https://${env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com/${env.R2_BUCKET}/${path}`);
   url.searchParams.set("X-Amz-Expires", String(Math.min(ttlSeconds, 7 * 86400))); // R2 limit: 7 days
-  const signed = await client.sign(new Request(url, { method: "GET" }), { aws: { signQuery: true } });
+  const signed = await client.sign(new Request(url.href, { method: "GET" }), { aws: { signQuery: true } });
   return signed.url;
 }

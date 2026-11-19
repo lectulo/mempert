@@ -68,10 +68,11 @@ type CobaltReply = {
   error?: { code: string };
 };
 
-/** Media of `url` from the cobalt API (COBALT_URL, the public instance by default). */
+/** Media of `url` from the explicitly configured local cobalt API. */
 export async function cobalt(env: Env, url: string): Promise<Fetched> {
+  if (!env.COBALT_URL) throw new Error("COBALT_URL is required for link imports; start the local cobalt service");
   const auth: Record<string, string> = env.COBALT_API_KEY ? { Authorization: `Api-Key ${env.COBALT_API_KEY}` } : {};
-  const res = await fetch(env.COBALT_URL ?? "https://api.cobalt.tools/", {
+  const res = await fetch(env.COBALT_URL, {
     method: "POST",
     headers: { Accept: "application/json", "Content-Type": "application/json", ...auth },
     // 720p keeps videos under the upload limit; GIFs stay mp4 so they fit in albums.

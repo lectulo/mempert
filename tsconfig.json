@@ -4,7 +4,7 @@
     "lib": ["es2023"],
     "module": "esnext",
     "moduleResolution": "bundler",
-    "types": ["@cloudflare/workers-types", "node", "@cloudflare/vitest-plugin/types"],
+    "types": ["@cloudflare/workers-types", "bun", "node", "@cloudflare/vitest-plugin/types"],
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true,

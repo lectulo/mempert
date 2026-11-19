@@ -132,7 +132,7 @@ async function hmacHex(key: string, data: string) {
 
 function sameText(a: string, b: string) {
   const [x, y] = [new TextEncoder().encode(a), new TextEncoder().encode(b)];
-  return x.byteLength === y.byteLength && crypto.subtle.timingSafeEqual(x, y);
+  return x.byteLength === y.byteLength && timingSafeEqual(x, y);
 }
 
 /** BTCPay webhook: verified by BTCPay-Sig; the invoice status is re-read from BTCPay before it is applied. */
@@ -154,3 +154,4 @@ export async function handleBtcpay(req: Request, env: Env): Promise<Response> {
   }
   return new Response("OK");
 }
+import { timingSafeEqual } from "node:crypto";

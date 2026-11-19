@@ -18,7 +18,7 @@ import { getCookie, readSession } from "./session";
 import { TOKEN_PREFIX, tokenUser } from "./tokens";
 import { serveOpenapi } from "./openapi";
 import type { Env } from "./env";
-import { cachedMedia, extOf, fileKey, memeMedia, previewKey, signedQuery, verifyQuery } from "./media";
+import { cachedMedia, extOf, fileKey, memeMedia, mediaResponse, previewKey, signedQuery, verifyQuery } from "./media";
 import { sendAlbum, sendMeme, toInlineResult } from "./search/deliver";
 import { agentSearch } from "./search/agent";
 import { shareLinks } from "./share";
@@ -42,7 +42,7 @@ const URL_TTL = 86400;
 const FILE_MAX = 20 * 1024 * 1024; // Bot API getFile limit
 const enc = (s: string) => new TextEncoder().encode(s);
 
-async function hmac(key: BufferSource, data: string) {
+async function hmac(key: Uint8Array<ArrayBuffer>, data: string) {
   const k = await crypto.subtle.importKey("raw", key, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   return new Uint8Array(await crypto.subtle.sign("HMAC", k, enc(data)));
 }
@@ -667,10 +667,11 @@ async function handleMedia(req: Request, env: Env, ctx: ExecutionContext, url: U
     const meme = await getMeme(env.DB, id);
     if (!meme || (kind === "file" && !fileFits(meme))) return null;
     // Reading from R2 back-fills Telegram-only memes, so each file is downloaded from Telegram once.
-    const media = await memeMedia(env, meme, kind === "thumb" ? "preview" : "file").catch(() => null);
+    const media = await mediaResponse(env, meme, kind === "thumb" ? "preview" : "file", req).catch(() => null);
     const dl = url.searchParams.get("dl"); // batch download: save as a file (the name is not signed, so it is encoded)
     const disposition: Record<string, string> = dl ? { "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(dl)}` } : {};
-    return media && new Response(media.bytes, { headers: { "Content-Type": media.mime, ...disposition } });
+    if (media) for (const [key,value] of Object.entries(disposition)) media.headers.set(key,value);
+    return media;
   });
 }
 
