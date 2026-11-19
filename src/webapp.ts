@@ -6,6 +6,7 @@ import { insertMeme, type AddedVia } from "./ingest/receive";
 import { parseJson, saveDescription, toDescription, type Description, type SourceMeta } from "./ingest/describe";
 import { collectingImport } from "./batch";
 import { MODELS } from "./config";
+import { photoModel } from "./photoprovider";
 import { handleAccount } from "./webaccount";
 import { albumZip } from "./albumzip";
 import { addToPost, albumMemes } from "./channels";
@@ -455,7 +456,7 @@ async function handleApi(req: Request, env: Env, url: URL): Promise<Response> {
       role: user.role,
       search_mode: user.search_mode,
       key: user.openrouter_key !== null,
-      models: MODELS,
+      models: { ...MODELS, describeImage: photoModel(env, user) },
       describe_tier: user.describe_tier,
       hide_porn: !!user.hide_porn,
       blur_porn: !!user.blur_porn,

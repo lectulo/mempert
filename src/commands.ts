@@ -1,7 +1,8 @@
 import type { Composer } from "grammy";
 import type { Message } from "grammy/types";
 import type { Ctx } from "./bot";
-import { DESCRIBE_MODELS, MODELS } from "./config";
+import { MODELS } from "./config";
+import { photoModel } from "./photoprovider";
 import { deleteMeme, type User } from "./db";
 import type { Env } from "./env";
 import { publicWebAppUrl } from "./telegramurl";
@@ -123,7 +124,7 @@ export function registerCommands<C extends Ctx>(bot: Composer<C>, env: Env) {
 
   bot.command("about", (ctx) =>
     ctx.reply(
-      t(ctx.lang, "about", { embed: MODELS.embed, image: DESCRIBE_MODELS[ctx.user.describe_tier], video: MODELS.describeVideo, search: MODELS.search }),
+      t(ctx.lang, "about", { embed: MODELS.embed, image: esc(photoModel(env, ctx.user)), video: MODELS.describeVideo, search: MODELS.search }),
       html,
     ),
   );

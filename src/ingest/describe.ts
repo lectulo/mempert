@@ -10,6 +10,7 @@ import { chat, embed, errorNote, type Part } from "../openrouter";
 import { sha256hex } from "../cache";
 import { namespace, upsertEmbedded } from "./embed";
 import { showSaveStatus } from "../savewidget";
+import { photoProvider, providerDescription } from "../photoprovider";
 
 export interface Description {
   title: string;
@@ -70,8 +71,8 @@ const PROMPT = `You index memes for a private meme search engine. Look at the at
 1. Transcribe ALL visible text verbatim in its original language and script, keep line breaks. Do not translate, fix or censor it.
 2. For video: transcribe speech or lyrics verbatim in speech_text. For images speech_text is "".
 3. Identify the meme template or format, characters, people, the source (film, show, game, stream, event) and the joke.
-   If you recognize or suspect a known meme, quote or person, use web_search to confirm the origin and meaning.
-   Use web_fetch for pages such as Know Your Meme or Wikipedia. Do not search for generic images.
+   If web tools are available and you recognize or suspect a known meme, quote or person, use them to confirm the origin and meaning.
+   Otherwise rely on visible evidence and mark uncertain origins as unknown. Do not search for generic images.
 4. Explain the cultural meaning: when and how people use it, the emotion it conveys, the community or region.
 5. Never invent facts. If something is unknown, say so briefly. Do not censor slang or swearing that people would search for.
 6. description, meme_context and cultural_meaning are in English. tags and search_phrases are in English AND in the meme's own language (if different).
@@ -309,7 +310,9 @@ export async function describeStage(env: Env, memeId: string, from = 0, single =
 /** Describes the memes in one request (the first one is `m`) and saves the descriptions; the others get finish jobs. */
 async function describeGroup(env: Env, m: Meme, group: Meme[], from: number, note = "") {
   const memeId = m.id;
-  const tier = await userTier(env.DB, m.user_id);
+  const user = await getUser(env.DB, m.user_id);
+  const tier = user?.describe_tier ?? DEFAULT_TIER;
+  const provider = m.kind === "photo" && !user?.openrouter_key ? photoProvider(env) : null;
   const tags = await topTags(env.DB, m.user_id);
   const build = async (frame: boolean) => {
     const media = group.length > 1
@@ -323,12 +326,13 @@ async function describeGroup(env: Env, m: Meme, group: Meme[], from: number, not
     };
   };
   let body = await build(false);
-  const models = describeModels(m, tier);
+  const models = provider ? [provider.model] : describeModels(m, tier);
   for (let i = Math.min(from, models.length - 1); ; i++) {
     try {
       // The uncensored model has no video input: a video goes to it as its preview frame.
       if (m.kind !== "photo" && models[i] === DESCRIBE_UNCENSORED) body = await build(true);
-      const msg = await chat(env, { ...body, model: models[i] }, { userId: m.user_id, memeId, kind: "describe" });
+      const spend = { userId: m.user_id, memeId, kind: "describe" };
+      const msg = provider ? await providerDescription(env, provider, body, spend) : await chat(env, { ...body, model: models[i] }, spend);
       if (!msg.content?.trim()) throw new Error(`${models[i]}: empty answer`);
       const ds = parseAnswer(msg.content, msg.refusal, group.length);
       await env.DB.batch(group.map((g, j) => saveDescription(env.DB, g, ds[j])));
