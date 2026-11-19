@@ -15,7 +15,7 @@ export type UploadJob = { userId: number; memeIds: string[] };
 const MAX_UPLOAD = 50 * 2 ** 20; // Bot API upload limit
 const MAX_PHOTO = 10 * 2 ** 20; // sendPhoto limit
 const PER_CRON = Math.floor((15 * 60 * 1000) / UPLOAD_GAP_MS) - 40; // what the queue sends in 15 min, with a margin
-const JOB = 25; // memes per job
+const JOB = 1; // release the shared consumer between uploads; delays provide pacing
 const TRIES = 5; // a meme that fails this often is left to inline (it may be broken)
 
 /** Ids of memes that are not in Telegram yet and can be uploaded. */
@@ -27,14 +27,22 @@ export async function queueUploads(env: Env) {
   const { results } = await env.DB.prepare(
     `UPDATE memes SET upload_at = unixepoch(), upload_tries = upload_tries + 1 WHERE id IN (
        SELECT id FROM memes WHERE file_id = '' AND r2_file IS NOT NULL AND status != 'failed' AND upload_tries < ?1 AND (upload_at IS NULL OR upload_at < unixepoch() - 3600)
-         AND COALESCE(file_size, 0) <= IIF(kind = 'photo', ?2, ?3) ORDER BY created_at DESC LIMIT ?4)
+          AND r2_file != ''
+          AND (?5 != 0 OR EXISTS (SELECT 1 FROM channels c WHERE c.user_id = memes.user_id AND c.storage = 1 AND c.chat_id != 0))
+          AND COALESCE(file_size, 0) <= IIF(kind = 'photo', ?2, ?3) ORDER BY created_at DESC LIMIT ?4)
      RETURNING id, user_id`,
   )
-    .bind(TRIES, MAX_PHOTO, MAX_UPLOAD, PER_CRON)
+    .bind(TRIES, MAX_PHOTO, MAX_UPLOAD, PER_CRON, Number(env.STORAGE_CHAT_ID) || 0)
     .all<{ id: string; user_id: number }>();
   const byUser = new Map<number, string[]>();
   for (const r of results) byUser.set(r.user_id, [...(byUser.get(r.user_id) ?? []), r.id]);
-  for (const [userId, ids] of byUser) for (let i = 0; i < ids.length; i += JOB) await env.UPLOADS.send({ userId, memeIds: ids.slice(i, i + JOB) });
+  // Round robin users rather than putting a large owner's entire library first.
+  let slot = 0;
+  for (let i = 0; [...byUser.values()].some(ids => i < ids.length); i += JOB) {
+    for (const [userId, ids] of byUser) if (i < ids.length) {
+      await env.UPLOADS.send({ userId, memeIds: ids.slice(i, i + JOB) }, { delaySeconds: Math.ceil(slot++ * UPLOAD_GAP_MS / 1000) });
+    }
+  }
 }
 
 /** Uploads the job's memes one by one; throws busy errors (the job retries later), stops when the chat is lost. */
@@ -45,7 +53,7 @@ export async function uploadJob(env: Env, api: Api, { userId, memeIds }: UploadJ
   for (const id of memeIds) {
     const m = await getMeme(env.DB, id);
     if (!m || m.user_id !== userId || m.file_id) continue;
-    if (!first) await scheduler.wait(gap);
+    if (!first) await new Promise(resolve => setTimeout(resolve, gap));
     first = false;
     try {
       await sendMeme(env, api, chatId, m, { disable_notification: true });
@@ -62,7 +70,11 @@ export async function handleUploads(batch: MessageBatch<UploadJob>, env: Env) {
   const api = new Api(env.BOT_TOKEN, telegramClientOptions());
   for (const msg of batch.messages) {
     try {
-      await uploadJob(env, api, msg.body);
+      // Inline queries and old queue records may still contain many IDs. Split
+      // them too, without holding the one shared consumer through long sleeps.
+      const [id, ...rest] = msg.body.memeIds;
+      if (id) await uploadJob(env, api, { userId: msg.body.userId, memeIds: [id] });
+      if (rest.length) await env.UPLOADS.send({ userId: msg.body.userId, memeIds: rest }, { delaySeconds: Math.ceil(UPLOAD_GAP_MS / 1000) });
       msg.ack();
     } catch (e) {
       const wait = e instanceof GrammyError ? e.parameters.retry_after : undefined;

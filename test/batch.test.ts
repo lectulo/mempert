@@ -72,6 +72,7 @@ describe("batch import", () => {
     await addMeme("p2", 23, "imp");
 
     let submitted: any;
+    let batchNumber = 0;
     const telegram: string[] = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = String(input);
@@ -81,10 +82,10 @@ describe("batch import", () => {
       }
       if (init?.method === "POST") {
         submitted = JSON.parse(String(init.body));
-        return json({ id: "b1", status: "validating" }, 202);
+        return json({ id: `b${++batchNumber}`, status: "validating" }, 202);
       }
       return json({
-        id: "b1",
+        id: `b${batchNumber}`,
         status: "completed",
         usage: { cost: 0.01, prompt_tokens: 100, completion_tokens: 50 },
         results: [
@@ -120,6 +121,8 @@ describe("batch import", () => {
       expect(submitted.requests.map((r: any) => r.custom_id)).toEqual(["p2"]);
       await pollImports(e);
       expect(await e.DB.prepare("SELECT attempts FROM imports WHERE id = 'imp'").first<number>("attempts")).toBe(attempt);
+      expect(await e.DB.prepare("SELECT cost FROM imports WHERE id = 'imp'").first<number>("cost")).toBeCloseTo(attempt * 0.01);
+      expect(await e.DB.prepare("SELECT COUNT(*) AS n FROM transactions WHERE user_id = 23").first<number>("n")).toBe(attempt);
     }
     expect(await e.DB.prepare("SELECT status, described, cost FROM imports WHERE id = 'imp'").first()).toEqual({
       status: "done",
@@ -130,6 +133,7 @@ describe("batch import", () => {
     expect(telegram.at(-1)).toBe("sendMessage");
     const tx = await e.DB.prepare("SELECT kind, cost, key_source FROM transactions WHERE user_id = 23").first();
     expect(tx).toEqual({ kind: "describe_batch", cost: 0.01, key_source: "global" });
+    expect(await e.DB.prepare("SELECT total_cost FROM users WHERE id = 23").first<number>("total_cost")).toBeCloseTo(0.03);
   });
 });
 
@@ -234,14 +238,22 @@ describe("R2 keys and presigned batch links", () => {
     expect(await e.DB.prepare("SELECT r2_file FROM memes WHERE id = 'race'").first<string>("r2_file")).toBe("r2/racesha.jpg");
   });
 
-  it("presigns batch image links on the R2 S3 endpoint when API keys are set", async () => {
+  it("returns null when R2 account or credentials are incomplete", async () => {
     const { env: base } = fakeEnv();
-    const e = { ...base, R2_ACCESS_KEY_ID: "AKID", R2_SECRET_ACCESS_KEY: "secret" } as Env;
+    const complete = { ...base, R2_ACCOUNT_ID: "test-account", R2_BUCKET: "memesave-media", R2_ACCESS_KEY_ID: "AKID", R2_SECRET_ACCESS_KEY: "secret" } as Env;
+    for (const field of ["R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"] as const) {
+      expect(await presignedR2Url({ ...complete, [field]: "" }, "u/1/abc.jpg", 60)).toBeNull();
+    }
+  });
+
+  it("presigns legacy R2 image links when the full account and credentials are configured", async () => {
+    const { env: base } = fakeEnv();
+    const e = { ...base, R2_ACCOUNT_ID: "test-account", R2_BUCKET: "memesave-media", R2_ACCESS_KEY_ID: "AKID", R2_SECRET_ACCESS_KEY: "secret" } as Env;
     const url = new URL((await presignedR2Url(e, "u/1/abc.jpg", 5 * 86400))!);
-    expect(url.origin + url.pathname).toBe(`https://${e.R2_ACCOUNT_ID}.r2.cloudflarestorage.com/memesave-media/u/1/abc.jpg`);
+    expect(url.origin + url.pathname).toBe("https://test-account.r2.cloudflarestorage.com/memesave-media/u/1/abc.jpg");
     expect(url.searchParams.get("X-Amz-Expires")).toBe(String(5 * 86400));
+    expect(url.searchParams.get("X-Amz-Credential")).toContain("AKID/");
     expect(url.searchParams.get("X-Amz-Signature")).toMatch(/^[0-9a-f]{64}$/);
-    expect(await presignedR2Url(base, "u/1/abc.jpg", 60)).toBeNull(); // without keys the Worker URL is used
   });
 });
 

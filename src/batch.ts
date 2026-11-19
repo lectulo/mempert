@@ -1,6 +1,6 @@
 import { botApi } from "./botapi";
 import { DESCRIBE_MODELS, MODELS } from "./config";
-import { getMeme, userLang, type Meme } from "./db";
+import { getMeme, getUser, userLang, type Meme } from "./db";
 import type { Env } from "./env";
 import { push } from "./live";
 import { esc, t, usd, type Key } from "./i18n";
@@ -10,7 +10,7 @@ import { presignedR2Url } from "./presign";
 import { rekeyStage } from "./rekey";
 import { createBatch, errorNote, getBatch, type Batch, type KeySource } from "./openrouter";
 import type { Job } from "./queue";
-import { recordSpend } from "./spend";
+import { splitCost } from "./billing";
 
 const BATCH_MAX = 5000; // OpenRouter limit per batch
 const MEDIA_TTL = 5 * 86400; // longer than the 96 h Vertex window, shorter than the 7-day R2 lifecycle
@@ -31,6 +31,7 @@ interface Import {
   described: number;
   cost: number;
   model: string | null;
+  submission_started: number;
 }
 
 type Status = Pick<Import, "user_id" | "status_msg_id">;
@@ -58,6 +59,53 @@ async function sendJobs(env: Env, jobs: Job[]) {
 }
 
 const describeJobs = (memes: Meme[]): Job[] => memes.map((m) => ({ type: "describe", memeId: m.id, gen: m.gen }));
+
+function continuation(db: D1Database, job: Job) {
+  const body = JSON.stringify(job);
+  return db.prepare("INSERT OR IGNORE INTO batch_continuations (id, body) VALUES (?, ?)").bind(body, body);
+}
+
+/** At-least-once enqueue: never delete the durable intent before send succeeds. */
+export async function flushBatchContinuations(env: Env) {
+  const { results } = await env.DB.prepare("SELECT id, body FROM batch_continuations").all<{ id: string; body: string }>();
+  for (const row of results) {
+    await env.JOBS.send(JSON.parse(row.body) as Job);
+    await env.DB.prepare("DELETE FROM batch_continuations WHERE id = ?").bind(row.id).run();
+  }
+}
+
+async function failUnknownSubmission(env: Env, imp: Import) {
+  const error = "Batch submission interrupted: external outcome unknown; retry failed photos manually";
+  await env.DB.batch([
+    env.DB.prepare("UPDATE imports SET status='failed', error=? WHERE id=?").bind(error, imp.id),
+    env.DB.prepare("UPDATE memes SET status='failed', error=? WHERE import_id=? AND title IS NULL AND status IN ('embedding','describing')").bind(error, imp.id),
+  ]);
+  await push(env, imp.user_id, { t: "job", kind: "batch" });
+  // Unlike batch_failed, this must not promise automatic full-price fallback.
+  // The durable SQL error is authoritative. Telegram availability must never
+  // hold startup readiness behind network timeouts or auto-retry sleeps.
+  void botApi(env.BOT_TOKEN).sendMessage(imp.user_id, error).catch(console.error);
+}
+
+/** Single-app startup only, after migrations and BEFORE queue consumers/pollers.
+ * Safe to repeat. Does not query OpenRouter. Replays durable continuations and
+ * re-polls known batches; unknown external submissions fail visibly, never resubmit.
+ */
+export async function recoverBatchImports(env: Env) {
+  await env.DB.prepare("UPDATE imports SET status = 'submitted' WHERE status = 'processing' AND batch_id IS NOT NULL").run();
+  const { results } = await env.DB.prepare("SELECT * FROM imports WHERE status IN ('submitting', 'processing')").all<Import>();
+  for (const imp of results) {
+    if (imp.submission_started || imp.status === "processing") {
+      await failUnknownSubmission(env, imp);
+    } else {
+      await continuation(env.DB, { type: "batch_submit", importId: imp.id }).run();
+    }
+  }
+  const all = await env.DB.prepare("SELECT id FROM imports").all<{ id: string }>();
+  for (const imp of all.results) await finishDescribed(env, imp.id);
+  await flushBatchContinuations(env);
+  if (await env.DB.prepare("SELECT 1 FROM imports WHERE status='submitted' LIMIT 1").first()) await env.JOBS.send({ type: "batch_poll" });
+}
 
 /** Memes of an import that still wait for a description. */
 const pending = async (db: D1Database, importId: string) =>
@@ -195,6 +243,7 @@ export async function cancelImport(env: Env, userId: number): Promise<number | n
 export async function submitImport(env: Env, importId: string) {
   const imp = await env.DB.prepare("SELECT * FROM imports WHERE id = ?").bind(importId).first<Import>();
   if (imp?.status !== "submitting") return;
+  if (imp.submission_started) return; // another submit owns it; startup resolves interrupted ownership
   await finishDescribed(env, importId);
   const memes = await pending(env.DB, importId);
   if (memes.some((m) => m.status === "embedding")) {
@@ -222,20 +271,30 @@ export async function submitImport(env: Env, importId: string) {
       )),
     );
   }
-  const { batch, source } = await createBatch(
-    env,
-    imp.user_id,
-    {
-      endpoint: "/v1/chat/completions",
-      model: DESCRIBE_MODELS[tier],
-      completion_window: "24h",
-      callback_url: `${env.PUBLIC_URL.replace(/\/$/, "")}/batch/webhook`,
-    },
-    requests,
-  );
+  const claimed = await env.DB.prepare("UPDATE imports SET submission_started=1 WHERE id=? AND status='submitting' AND submission_started=0 RETURNING id").bind(importId).first();
+  if (!claimed) return;
+  let created: Awaited<ReturnType<typeof createBatch>>;
+  try {
+    created = await createBatch(
+      env,
+      imp.user_id,
+      {
+        endpoint: "/v1/chat/completions",
+        model: DESCRIBE_MODELS[tier],
+        completion_window: "24h",
+        callback_url: `${env.PUBLIC_URL.replace(/\/$/, "")}/batch/webhook`,
+      },
+      requests,
+    );
+  } catch (error) {
+    console.error("batch submission outcome unknown", imp.id, error);
+    await failUnknownSubmission(env, imp);
+    return;
+  }
+  const { batch, source } = created;
   const attempt = imp.attempts + 1;
   await env.DB.prepare(
-    "UPDATE imports SET status = 'submitted', batch_id = ?, key_source = ?, attempts = ?, model = ?, updated_at = unixepoch() WHERE id = ?",
+    "UPDATE imports SET status = 'submitted', submission_started=0, batch_id = ?, key_source = ?, attempts = ?, model = ?, updated_at = unixepoch() WHERE id = ?",
   )
     .bind(batch.id, source, attempt, DESCRIBE_MODELS[tier], importId)
     .run();
@@ -259,6 +318,8 @@ async function batchImageUrl(env: Env, m: Meme) {
 
 /** Last-retry failure of a submit: the photos go to the normal pipeline. */
 export async function failImport(env: Env, importId: string, error: unknown) {
+  const current = await env.DB.prepare("SELECT * FROM imports WHERE id=?").bind(importId).first<Import>();
+  if (current?.submission_started) return failUnknownSubmission(env, current);
   const imp = await env.DB.prepare(
     "UPDATE imports SET status = 'failed', error = ?, updated_at = unixepoch() WHERE id = ? RETURNING user_id, status_msg_id",
   )
@@ -272,6 +333,7 @@ export async function failImport(env: Env, importId: string, error: unknown) {
 
 /** Checks all submitted imports; called by the OpenRouter webhook and by cron. */
 export async function pollImports(env: Env) {
+  await flushBatchContinuations(env);
   const { results } = await env.DB.prepare("SELECT * FROM imports WHERE status = 'submitted'").all<Import>();
   for (const imp of results) {
     await finishDescribed(env, imp.id);
@@ -285,11 +347,15 @@ export async function pollImports(env: Env) {
  */
 async function finishDescribed(env: Env, importId: string) {
   const { results } = await env.DB.prepare(
-    "UPDATE memes SET import_id = NULL WHERE import_id = ? AND status = 'describing' AND title IS NOT NULL RETURNING id, gen",
+    "SELECT id, gen FROM memes WHERE import_id = ? AND status = 'describing' AND title IS NOT NULL",
   )
     .bind(importId)
     .all<{ id: string; gen: number }>();
-  await sendJobs(env, results.map((r): Job => ({ type: "finish", memeId: r.id, gen: r.gen })));
+  for (const r of results) await env.DB.batch([
+    continuation(env.DB, { type: "finish", memeId: r.id, gen: r.gen }),
+    env.DB.prepare("UPDATE memes SET import_id=NULL WHERE id=? AND gen=? AND import_id=?").bind(r.id, r.gen, importId),
+  ]);
+  await flushBatchContinuations(env);
 }
 
 async function pollImport(env: Env, imp: Import) {
@@ -317,40 +383,58 @@ async function pollImport(env: Env, imp: Import) {
       const response = byId.get(m.id)?.response;
       const msg = (response?.body ?? response)?.choices?.[0]?.message; // OpenRouter wraps it in "body"
       try {
-        updates.push(saveDescription(db, m, parseAnswer(msg?.content ?? "", msg?.refusal)[0]));
+        updates.push(saveDescription(db, m, parseAnswer(msg?.content ?? "", msg?.refusal)[0]),
+          continuation(db, { type: "finish", memeId: m.id, gen: m.gen }),
+          db.prepare("UPDATE imports SET described=described+1 WHERE id=?").bind(imp.id));
         saved.push(m);
       } catch (e) {
         (isBlocked(e) ? blocked : retry).push(m); // a refusal would come again
       }
     }
-    for (let i = 0; i < updates.length; i += 100) await db.batch(updates.slice(i, i + 100));
-    if (batch.usage) await recordSpend(env, { userId: imp.user_id, kind: "describe_batch" }, imp.model ?? MODELS.describeImage, imp.key_source!, batch.usage);
-    await sendJobs(env, saved.map((m): Job => ({ type: "finish", memeId: m.id, gen: m.gen })));
+    // Three statements per meme must never be split between transactions.
+    for (let i = 0; i < updates.length; i += 90) await db.batch(updates.slice(i, i + 90));
+    // Receipt, transaction, balance and import cost commit together. No network
+    // inside the transaction, and retries cannot bill a completed batch twice.
+    const costOfBatch = batch.usage?.cost ?? 0;
+    const user = await getUser(db, imp.user_id);
+    const billed = user?.role === "paid" && imp.key_source === "global" && costOfBatch > 0
+      ? await splitCost(db, user, costOfBatch) : { fromAllowance: 0, fromBalance: 0 };
+    const unseen = "NOT EXISTS (SELECT 1 FROM batch_spend_receipts WHERE batch_id=?)";
+    await db.batch([
+      db.prepare(`INSERT INTO transactions (user_id,kind,model,key_source,cost,prompt_tokens,completion_tokens,from_allowance,from_balance)
+        SELECT ?, 'describe_batch', ?, ?, ?, ?, ?, ?, ? WHERE ${unseen}`)
+        .bind(imp.user_id, imp.model ?? MODELS.describeImage, imp.key_source!, costOfBatch, batch.usage?.prompt_tokens ?? null, batch.usage?.completion_tokens ?? null, billed.fromAllowance, billed.fromBalance, imp.batch_id),
+      db.prepare(`UPDATE users SET total_cost=total_cost+?, balance=balance-? WHERE id=? AND ${unseen}`).bind(costOfBatch, billed.fromBalance, imp.user_id, imp.batch_id),
+      db.prepare(`UPDATE imports SET cost=cost+? WHERE id=? AND ${unseen}`).bind(costOfBatch, imp.id, imp.batch_id),
+      db.prepare("INSERT OR IGNORE INTO batch_spend_receipts (batch_id,import_id) VALUES (?,?)").bind(imp.batch_id, imp.id),
+    ]);
     // Blocked photos leave the import and go to the next describe model one by one.
-    for (let i = 0; i < blocked.length; i += 50) {
-      const ids = blocked.slice(i, i + 50).map((m) => m.id);
-      await db.prepare(`UPDATE memes SET import_id = NULL WHERE id IN (${ids.map(() => "?").join(",")})`).bind(...ids).run();
-    }
-    await sendJobs(env, blocked.map((m): Job => ({ type: "describe", memeId: m.id, gen: m.gen, from: 1 })));
-    const described = imp.described + saved.length;
-    const cost = imp.cost + (batch.usage?.cost ?? 0);
+    for (const m of blocked) await db.batch([
+      continuation(db, { type: "describe", memeId: m.id, gen: m.gen, from: 1 }),
+      db.prepare("UPDATE memes SET import_id=NULL WHERE id=? AND gen=?").bind(m.id, m.gen),
+    ]);
+    const totals = (await db.prepare("SELECT described, cost FROM imports WHERE id=?").bind(imp.id).first<Import>())!;
+    const { described, cost } = totals;
+    await flushBatchContinuations(env);
     // Keep the batch status and the first errors to debug failures.
     const errors = (batch.results ?? []).filter((r) => r.error).slice(0, 3);
     const error = batch.status === "completed" && !errors.length ? null : JSON.stringify({ ...batch, results: errors }).slice(0, 2000);
 
     if (retry.length && imp.attempts < MAX_ATTEMPTS) {
       // Resubmit only the failed photos (they are still pending) in a new batch.
-      await db.prepare("UPDATE imports SET status = 'submitting', described = ?, cost = ?, error = ?, updated_at = unixepoch() WHERE id = ?")
-        .bind(described, cost, error, imp.id)
-        .run();
-      await env.JOBS.send({ type: "batch_submit", importId: imp.id }, { delaySeconds: 60 });
+      await db.batch([
+        db.prepare("UPDATE imports SET status='submitting', submission_started=0, error=?, updated_at=unixepoch() WHERE id=?").bind(error, imp.id),
+        continuation(db, { type: "batch_submit", importId: imp.id }),
+      ]);
+      await flushBatchContinuations(env);
       return;
     }
 
     const fallback = retry.length <= fallbackLimit(saved.length + retry.length);
     const reason = batchError(batch);
     if (fallback) {
-      await sendJobs(env, describeJobs(retry));
+      for (const job of describeJobs(retry)) await continuation(db, job).run();
+      await flushBatchContinuations(env);
     } else {
       for (let i = 0; i < retry.length; i += 50) {
         const ids = retry.slice(i, i + 50).map((m) => m.id);
@@ -367,7 +451,7 @@ async function pollImport(env: Env, imp: Import) {
     const key = !fallback ? "batch_stopped" : described ? "batch_done" : "batch_failed";
     await notify(env, imp, key, { ok: described, n: retry.length, cost: usd(cost), reason: esc(reason.slice(0, 300)) });
   } catch (e) {
-    await db.prepare("UPDATE imports SET status = 'submitted' WHERE id = ?").bind(imp.id).run();
+    await db.prepare("UPDATE imports SET status = 'submitted' WHERE id = ? AND status='processing'").bind(imp.id).run();
     throw e;
   }
 }

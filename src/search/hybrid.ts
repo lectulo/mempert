@@ -77,5 +77,15 @@ export async function hybridSearch(
     ...vectors.map((v) => safe(vectorList(env, userId, v))),
     ...texts.map((x) => safe(ftsList(env.DB, userId, x))),
   ]);
-  return loadMemes(env.DB, rrf(lists).slice(0, limit));
+  // The vector index is not an authorization boundary. Filter before limit so a
+  // foreign/stale hit cannot displace a valid result either.
+  const ids = rrf(lists);
+  const owned = new Set<string>();
+  for (let i = 0; i < ids.length; i += 90) {
+    const chunk = ids.slice(i, i + 90);
+    const { results } = await env.DB.prepare(`SELECT id FROM memes WHERE user_id = ? AND id IN (${chunk.map(() => "?").join(",")})`)
+      .bind(userId, ...chunk).all<{ id: string }>();
+    for (const row of results) owned.add(row.id);
+  }
+  return loadMemes(env.DB, ids.filter(id => owned.has(id)).slice(0, limit));
 }

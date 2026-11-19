@@ -69,11 +69,17 @@ describe("silent uploads for inline", () => {
     await meme("q4", 92, "tg");
     await meme("q5", 92);
     await e.DB.prepare("UPDATE memes SET file_size = ? WHERE id = 'q5'").bind(11 * 2 ** 20).run();
-    const sent: { userId: number; memeIds: string[] }[] = [];
-    const c = { ...e, UPLOADS: { send: async (j: { userId: number; memeIds: string[] }) => void sent.push(j) } } as unknown as Env;
+    const sent: { userId: number; memeIds: string[]; delaySeconds: number }[] = [];
+    const c = { ...e, UPLOADS: { send: async (j: { userId: number; memeIds: string[] }, opts?: { delaySeconds: number }) => void sent.push({ ...j, delaySeconds: opts?.delaySeconds ?? 0 }) } } as unknown as Env;
     await queueUploads(c);
-    const mine = sent.filter((j) => j.userId === 91 || j.userId === 92).map((j) => ({ ...j, memeIds: j.memeIds.sort() }));
-    expect(mine.sort((a, b) => a.userId - b.userId)).toEqual([{ userId: 91, memeIds: ["q1", "q2"] }, { userId: 92, memeIds: ["q3"] }]);
+    const mine = sent.filter((j) => j.userId === 91 || j.userId === 92);
+    expect(mine.every(j => j.memeIds.length === 1)).toBe(true);
+    expect(mine.map(j => ({ userId: j.userId, id: j.memeIds[0] })).sort((a, b) => a.id.localeCompare(b.id))).toEqual([
+      { userId: 91, id: "q1" }, { userId: 91, id: "q2" }, { userId: 92, id: "q3" },
+    ]);
+    expect(mine[0].userId).not.toBe(mine[1].userId); // round-robin owners
+    expect(mine[0].delaySeconds).toBeGreaterThanOrEqual(0);
+    for (let i = 1; i < mine.length; i++) expect(mine[i].delaySeconds - mine[i - 1].delaySeconds).toBeGreaterThanOrEqual(3);
     sent.length = 0;
     await queueUploads(c);
     expect(sent.filter((j) => j.userId === 91 || j.userId === 92)).toEqual([]); // queued less than 1 h ago
