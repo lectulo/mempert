@@ -49,7 +49,7 @@ describe("gallery sites", () => {
     const l = await scraper.fetch(c, new URL("https://telegra.ph/My-Comic-01-01/"), "5");
     expect(l.items.map((i) => ("url" in i ? i.url : ""))).toEqual(["https://img.test/p0.jpg", "https://telegra.ph/file/p1.jpg", "https://img.test/p2.jpg"]);
     const [, init] = spy.mock.calls[0];
-    expect(new Headers(init!.headers).get("Authorization")).toBe(`Api-Key ${c.SCRAPER_API_KEY}`);
+    expect(new Request("https://test.invalid", init).headers.get("Authorization")).toBe(`Api-Key ${c.SCRAPER_API_KEY}`);
     expect(JSON.parse(String(init!.body))).toMatchObject({ url: "https://telegra.ph/My-Comic-01-01/", cursor: "5" });
 
     spy.mockImplementation(async () => Response.json({ error: { code: "upstream", status: 429 } }, { status: 502 }));

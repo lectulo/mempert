@@ -31,7 +31,7 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 const enc = (s: string) => new TextEncoder().encode(s);
-async function hmac(key: BufferSource, data: string) {
+async function hmac(key: Uint8Array<ArrayBuffer>, data: string) {
   const k = await crypto.subtle.importKey("raw", key, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   return new Uint8Array(await crypto.subtle.sign("HMAC", k, enc(data)));
 }

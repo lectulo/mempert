@@ -15,7 +15,7 @@ beforeEach(() => void vi.spyOn(globalThis, "fetch").mockImplementation(async () 
 afterEach(() => vi.restoreAllMocks());
 
 const enc = (s: string) => new TextEncoder().encode(s);
-const hmac = async (key: BufferSource, data: string) =>
+const hmac = async (key: Uint8Array<ArrayBuffer>, data: string) =>
   new Uint8Array(await crypto.subtle.sign("HMAC", await crypto.subtle.importKey("raw", key, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]), enc(data)));
 async function api(userId: number, path: string, method = "GET", body?: object) {
   const params = new URLSearchParams({ auth_date: String(Math.floor(Date.now() / 1000)), user: JSON.stringify({ id: userId, first_name: "U" }) });

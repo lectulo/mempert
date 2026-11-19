@@ -38,7 +38,7 @@ describe("API tokens", () => {
       const url = String(input);
       if (url === e.COBALT_URL) return Response.json({ status: "picker", picker: [{ type: "photo", url: "https://cdn/1" }, { type: "photo", url: "https://cdn/2" }] });
       if (url.startsWith("https://cdn/")) return new Response("X", { headers: { "Content-Type": "image/jpeg" } });
-      sent.push(await new Response(init?.body).text());
+      sent.push(await new Request("https://test.invalid", {method:"POST",...init}).text());
       const photo = (n: number) => ({ message_id: n, photo: [{ file_id: `f${n}`, file_unique_id: `api${n}`, width: 1, height: 1 }] });
       return Response.json({ ok: true, result: [photo(1), photo(2)] });
     });

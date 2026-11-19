@@ -50,7 +50,7 @@ afterEach(() => vi.restoreAllMocks());
 const call = async (id: string, path: string, init: RequestInit = {}) =>
   handleAnalysis(new Request(`https://m.example/analysis/${id}/${path}`, { ...init, headers: { Authorization: `Bearer ${await sign(e, `analysis|${id}`)}` } }), e);
 const enc = (s: string) => new TextEncoder().encode(s);
-const hmac = async (key: BufferSource, data: string) =>
+const hmac = async (key: Uint8Array<ArrayBuffer>, data: string) =>
   new Uint8Array(await crypto.subtle.sign("HMAC", await crypto.subtle.importKey("raw", key, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]), enc(data)));
 async function api(userId: number, path: string, init: RequestInit = {}) {
   const params = new URLSearchParams({ auth_date: String(Math.floor(Date.now() / 1000)), user: JSON.stringify({ id: userId, first_name: "U" }) });

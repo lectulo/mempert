@@ -31,7 +31,7 @@ const mp4 = (id: number) => post(id, { file: { ext: "webm", size: 99 << 20, url:
 /** A fake e621 behind a fake scraper: lists (by page), posts and pools; every image has its own bytes. */
 function mockSite(o: { fav?: Post[][]; vote?: Post[][]; posts?: Post[]; pools?: Record<number, { category: string; post_ids: number[] }>; auth?: number; favCount?: number } = {}) {
   const seen: { url: string; headers: Record<string, string> }[] = [];
-  const site = async (href: string, headers: HeadersInit = {}) => {
+  const site = async (href: string, headers: Record<string,string> = {}) => {
     const url = new URL(href);
     seen.push({ url: url.href, headers: Object.fromEntries(new Headers(headers)) });
     if (url.host === "static1.e621.net") return new Response(`IMG ${url.href}`, { headers: { "Content-Type": url.pathname.endsWith(".mp4") ? "video/mp4" : "image/jpeg" } });
@@ -67,7 +67,7 @@ function mockSite(o: { fav?: Post[][]; vote?: Post[][]; posts?: Post[]; pools?: 
   };
   const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const href = String(input);
-    if (!href.startsWith(c.SCRAPER_URL)) return site(href, init?.headers);
+    if (!href.startsWith(c.SCRAPER_URL)) return site(href, Object.fromEntries(new Request(href, init).headers));
     const body = JSON.parse(String(init!.body));
     const path = href.slice(c.SCRAPER_URL.length);
     return path === "fetch" ? site(body.url, body.headers) : path === "media" ? site(body.url) : Response.json(await listing(body));

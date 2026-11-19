@@ -1,0 +1,12 @@
+{
+  "name": "mempert-legacy-tests",
+  "main": "../src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "vars": {"ADMIN_ID":"1457408124","PUBLIC_URL":"https://memereserve.cfb.wtf","SCRAPER_URL":"https://scraper.test/","COBALT_URL":"https://cobalt.test/","R2_BUCKET":"media"},
+  "d1_databases": [{"binding":"DB","database_name":"memesave","database_id":"local","migrations_dir":"../migrations"}],
+  "kv_namespaces": [{"binding":"OAUTH_KV","id":"local"}],
+  "r2_buckets": [{"binding":"MEDIA","bucket_name":"media"}],
+  "vectorize": [{"binding":"VECTORS","index_name":"local"}],
+  "queues": {"producers":[{"binding":"JOBS","queue":"memesave-jobs"},{"binding":"UPLOADS","queue":"memesave-tgupload"}]}
+}

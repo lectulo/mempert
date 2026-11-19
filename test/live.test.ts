@@ -10,7 +10,7 @@ const ctx = { waitUntil: () => {}, passThroughOnException: () => {} } as unknown
 const get = async (path: string, headers: HeadersInit = {}) => (await handleApp(new Request(`https://m.example${path}`, { headers }), e, ctx))!;
 
 const enc = (s: string) => new TextEncoder().encode(s);
-async function hmac(key: BufferSource, data: string) {
+async function hmac(key: Uint8Array<ArrayBuffer>, data: string) {
   const k = await crypto.subtle.importKey("raw", key, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   return new Uint8Array(await crypto.subtle.sign("HMAC", k, enc(data)));
 }
