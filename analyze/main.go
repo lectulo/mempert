@@ -25,6 +25,18 @@ const exitRestart = 75
 
 var apiURL, token = os.Getenv("API_URL"), os.Getenv("TOKEN")
 
+type workerTransport struct{ base http.RoundTripper }
+
+func (t workerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if strings.Contains(req.URL.Path, "/internal/jobs/") && strings.HasPrefix(req.URL.String(), apiURL+"/") {
+		req = req.Clone(req.Context())
+		req.Header.Set("X-Job-Lease", token)
+		req.Header.Set("Authorization", "Bearer "+os.Getenv("WORKER_SECRET"))
+	}
+	return t.base.RoundTrip(req)
+}
+func init() { http.DefaultClient.Transport = workerTransport{http.DefaultTransport} }
+
 func main() {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGTERM)

@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/signal"
 	"path"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"syscall"
@@ -27,10 +28,24 @@ import (
 const (
 	photoMax = 10 << 20 // Bot API sendPhoto limit, for the later send
 	videoMax = 50 << 20 // Bot API upload limit
-	zipPath  = "/tmp/in.zip"
 )
 
+var zipPath = filepath.Join(os.TempDir(), "in.zip")
+
 var env = struct{ zipURL, apiURL, token string }{os.Getenv("ZIP_URL"), os.Getenv("API_URL"), os.Getenv("TOKEN")}
+
+// The launcher supplies a lease token; only the private dispatcher accepts the worker secret.
+type workerTransport struct{ base http.RoundTripper }
+
+func (t workerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if strings.Contains(req.URL.Path, "/internal/jobs/") && strings.HasPrefix(req.URL.String(), env.apiURL+"/") {
+		req = req.Clone(req.Context())
+		req.Header.Set("X-Job-Lease", env.token)
+		req.Header.Set("Authorization", "Bearer "+os.Getenv("WORKER_SECRET"))
+	}
+	return t.base.RoundTrip(req)
+}
+func init() { http.DefaultClient.Transport = workerTransport{http.DefaultTransport} }
 
 // media is one file found in the archive.
 type media struct {
