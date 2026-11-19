@@ -23,6 +23,7 @@
     ...(me.role === "paid" ? [{ id: "billing", label: s.tabBilling }] : []),
     { id: "stats", label: s.tabStats },
     { id: "settings", label: s.tabSettings },
+    { id: "import", label: s.tabImport },
     ...(me.batch_enabled ? [{ id: "batch", label: s.tabBatch }] : []),
     ...(me.role === "admin" ? [{ id: "admin", label: s.tabAdmin }] : []),
     { id: "about", label: s.tabAbout },
@@ -44,7 +45,7 @@
   $effect(() => {
     if (!open) return;
     if (tab === "batch" && !me.batch_enabled) {
-      tab = "stats";
+      tab = "import";
       return;
     }
     message = null;
@@ -215,7 +216,7 @@
               {/if}
             </Inline>
             <Heading as="h3" size="sm">{s.exportTitle}</Heading>
-            <Text tone="muted" size="sm">{s.exportHint}{me.batch_enabled ? ` ${s.exportRestoreHint}` : ""}</Text>
+            <Text tone="muted" size="sm">{s.exportHint} {s.exportRestoreHint}</Text>
             {#if exp?.status === "running"}
               <Inline gap="sm" align="center"><Spinner label="Loading" /><Text>{s.exportRunning}</Text></Inline>
             {:else if exp?.status === "failed"}
@@ -239,6 +240,25 @@
               <TextField label={fill(s.deleteLabel, { confirm: DELETE_CONFIRM })} bind:value={deleteText} size="sm" />
               <Button size="sm" variant="danger" loading={busy} disabled={deleteText !== DELETE_CONFIRM} onclick={() => act(deleteAll)}>{s.deleteButton}</Button>
             </Inline>
+          {:else if current.id === "import"}
+            <Text tone="muted" size="sm">{s.zipImportHint} {me.batch_enabled ? s.zipImportBatch : s.zipImportRegular}</Text>
+            <Inline gap="sm">
+              <Button size="sm" variant="secondary" onclick={() => zipInput?.click()}>
+                {#snippet leading()}<Archive size={16} aria-hidden="true" />{/snippet}
+                {s.zipImport}
+              </Button>
+            </Inline>
+            <input
+              bind:this={zipInput}
+              type="file"
+              accept=".zip,application/zip"
+              hidden
+              onchange={(e) => {
+                addFiles(e.currentTarget.files ?? []);
+                e.currentTarget.value = "";
+                onClose();
+              }}
+            />
           {:else if current.id === "batch" && me.batch_enabled}
             {#if !batch}
               <Spinner label="Loading" />
@@ -251,23 +271,7 @@
                 {:else}
                   <Button size="sm" loading={busy} onclick={() => act(() => api.batchStart().then(reloadBatch))}>{s.batchStart}</Button>
                 {/if}
-                <Button size="sm" variant="secondary" onclick={() => zipInput?.click()}>
-                  {#snippet leading()}<Archive size={16} aria-hidden="true" />{/snippet}
-                  {s.batchZip}
-                </Button>
               </Inline>
-              <Text tone="muted" size="sm">{s.batchZipHint}</Text>
-              <input
-                bind:this={zipInput}
-                type="file"
-                accept=".zip,application/zip"
-                hidden
-                onchange={(e) => {
-                  addFiles(e.currentTarget.files ?? [], me.batch_enabled);
-                  e.currentTarget.value = "";
-                  onClose();
-                }}
-              />
               {#if batch.failed}
                 <Inline gap="sm" align="center" wrap>
                   <Text tone="muted">{fill(s.batchFailedN, { n: batch.failed })}</Text>

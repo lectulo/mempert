@@ -4,7 +4,7 @@ import { resolveUser } from "./auth";
 import { ALBUM_FIRST, albumSizes, visible, deleteMeme, deleteMemes, getMeme, getUser, recordUse, storageFull, type Kind, type Meme, type User } from "./db";
 import { insertMeme, type AddedVia } from "./ingest/receive";
 import { parseJson, saveDescription, toDescription, type Description, type SourceMeta } from "./ingest/describe";
-import { collectingImport } from "./batch";
+import { BATCH_DISABLED_ERROR, collectingImport } from "./batch";
 import { batchEnabled } from "./batchmode";
 import { MODELS } from "./config";
 import { photoModel } from "./photoprovider";
@@ -330,8 +330,9 @@ export async function downloadLinks(env: Env, userId: number, ids: string[]) {
 /** Same as forwarding a failed meme again in the bot; false when the meme has not failed. */
 export async function retryMeme(env: Env, meme: Meme) {
   if (meme.status !== "failed") return false;
-  await env.DB.prepare(`UPDATE memes SET status = 'embedding', error = NULL, ${batchEnabled(env) ? "" : "import_id = NULL,"}
-    updated_at = unixepoch() WHERE id = ?`).bind(meme.id).run();
+  await env.DB.prepare(`UPDATE memes SET status = 'embedding', error = NULL,
+    import_id = CASE WHEN ? OR error = ? THEN NULL ELSE import_id END,
+    updated_at = unixepoch() WHERE id = ?`).bind(!batchEnabled(env), BATCH_DISABLED_ERROR, meme.id).run();
   await env.JOBS.send({ type: "embed", memeId: meme.id, gen: meme.gen });
   return true;
 }
@@ -464,7 +465,7 @@ async function handleApi(req: Request, env: Env, url: URL): Promise<Response> {
       describe_tier: user.describe_tier,
       hide_porn: !!user.hide_porn,
       blur_porn: !!user.blur_porn,
-      batch_enabled: batchEnabled(env),
+      batch_enabled: batchEnabled(env), // OpenRouter batch controls and ZIP processing rates, not ZIP availability.
       billing: await billingStatus(env, user),
     });
   }

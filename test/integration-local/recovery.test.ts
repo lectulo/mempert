@@ -135,12 +135,24 @@ test("disabled batches stop unsubmitted work on startup and reject stale queue j
   expect((await f.env.DB.prepare("SELECT id FROM memes WHERE status='failed' ORDER BY id").all()).results)
     .toEqual(["blocked", "collecting", "stale", "submitting"].map(id => ({ id })));
   expect(f.jobs).toEqual([{ type: "finish", memeId: "described", gen: 0 }, { type: "describe", memeId: "normal", gen: 0 }]);
+  f.env.BATCH_ENABLED = "true";
+  await f.reopen();
+  await recoverBatchImports(f.env);
+  await submitImport(f.env, "queued");
+  await submitImport(f.env, "late");
+  await describeStage(f.env, "blocked", 1);
+  expect((await f.env.DB.prepare("SELECT DISTINCT status,error FROM imports").all()).results).toEqual([{ status: "failed", error: BATCH_DISABLED_ERROR }]);
+  expect(f.jobs).toEqual([{ type: "finish", memeId: "described", gen: 0 }, { type: "describe", memeId: "normal", gen: 0 }]);
   const { retryMeme } = await import("../../src/webapp");
   const { getMeme } = await import("../../src/db");
-  const stopped = (await getMeme(f.env.DB, "stale"))!;
-  expect(await retryMeme(f.env, stopped)).toBe(true);
-  expect((await getMeme(f.env.DB, "stale"))?.import_id).toBeNull();
-  expect(f.jobs.at(-1)).toEqual({ type: "embed", memeId: "stale", gen: stopped.gen });
+  for (const [enabled, id] of [["true", "stale"], ["false", "collecting"]] as const) {
+    f.env.BATCH_ENABLED = enabled;
+    const stopped = (await getMeme(f.env.DB, id))!;
+    expect(stopped).toMatchObject({ import_id: expect.any(String), error: BATCH_DISABLED_ERROR });
+    expect(await retryMeme(f.env, stopped)).toBe(true);
+    expect(await getMeme(f.env.DB, id)).toMatchObject({ import_id: null, status: "embedding", error: null });
+    expect(f.jobs.at(-1)).toEqual({ type: "embed", memeId: id, gen: stopped.gen });
+  }
 });
 
 test("disabled startup recovers a known batch and bills successes once without retrying failures", async () => {
@@ -155,6 +167,7 @@ test("disabled startup recovers a known batch and bills successes once without r
       unexpected.push(String(input)); throw new Error(`Unexpected external call: ${input}`);
     }
     polls++;
+    if (polls === 1) return Response.json({ id: "remote-1", status: "in_progress" });
     return Response.json({ id: "remote-1", status: "completed", usage: { cost: 0.125 }, results: [
       { custom_id: "photo", response: { body: { choices: [{ message: { content: '{"title":"Recovered otter"}' } }] } } },
       { custom_id: "failed", error: { message: "bad" } },
@@ -164,8 +177,11 @@ test("disabled startup recovers a known batch and bills successes once without r
   await recoverBatchImports(f.env);
   await describeStage(f.env, "photo"); // stale full-price fallback must not preempt the known batch
   await pollImports(f.env);
+  expect(await f.env.DB.prepare("SELECT status FROM imports WHERE id='imp'").first<string>("status")).toBe("submitted");
+  expect(await f.env.DB.prepare("SELECT count(*) AS n FROM transactions").first<number>("n")).toBe(0);
   await pollImports(f.env);
-  expect(polls).toBe(1);
+  await pollImports(f.env);
+  expect(polls).toBe(2);
   expect(f.jobs).toEqual([{ type: "batch_poll" }, { type: "finish", memeId: "photo", gen: 0 }]);
   expect(await f.env.DB.prepare("SELECT status,described,attempts,cost FROM imports WHERE id='imp'").first<Record<string, string | number>>())
     .toEqual({ status: "failed", described: 1, attempts: 1, cost: 0.125 });
@@ -184,6 +200,48 @@ test("forwarded photos use regular ingest even with a stale collecting batch", a
   expect(await f.env.DB.prepare("SELECT import_id,status_msg_id FROM memes WHERE file_id='tg'").first<{ import_id: string | null; status_msg_id: number }>())
     .toEqual({ import_id: null, status_msg_id: 5 });
   expect(f.jobs).toEqual([{ type: "embed", memeId: expect.any(String) }]);
+});
+
+test("forwarding a stopped batch photo again after re-enabling detaches it for ordinary ingest", async () => {
+  await f.meme("photo", 101);
+  await f.env.DB.exec("INSERT INTO imports(id,user_id,status) VALUES('open',101,'collecting');");
+  await f.env.DB.exec("UPDATE memes SET file_unique_id='unique',status='embedding',title=NULL,import_id='open' WHERE id='photo';");
+  f.env.BATCH_ENABLED = "false";
+  await recoverBatchImports(f.env);
+  f.env.BATCH_ENABLED = "true";
+  const ctx = { user: { id: 101 }, lang: "en", msg: { message_id: 42, photo: [{ file_id: "tg", file_unique_id: "unique", width: 20, height: 20 }] },
+    api: { raw: { sendWidget: async () => ({ message_id: 5 }) } },
+  } as unknown as Ctx;
+  await receiveMedia(ctx, f.env);
+  expect(await f.env.DB.prepare("SELECT status,import_id,error FROM memes WHERE id='photo'").first<{ status: string; import_id: string | null; error: string | null }>())
+    .toEqual({ status: "embedding", import_id: null, error: null });
+  expect(f.jobs).toEqual([{ type: "embed", memeId: "photo", gen: 1 }]);
+});
+
+test("ZIP photos without a provider batch use all ordinary ingest stages when batching is disabled", async () => {
+  f.env.BATCH_ENABLED = "false";
+  await f.meme("zip-photo", 101);
+  await f.env.DB.exec(`UPDATE memes SET status='embedding', title=NULL, added_via='zip', sha256='${"a".repeat(64)}' WHERE id='zip-photo'`);
+  const calls: string[] = [];
+  network.mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const url = String(input);
+    if (url === "https://openrouter.ai/api/v1/embeddings") {
+      const body = JSON.parse(String(init?.body));
+      calls.push(typeof body.input[0] === "string" ? "embed-text" : "embed-image");
+      return Response.json({ data: [{ index: 0, embedding: vector() }] });
+    }
+    if (url === "https://openrouter.ai/api/v1/chat/completions") {
+      calls.push("describe");
+      return Response.json({ choices: [{ message: { content: '{"title":"ZIP otter"}' } }] });
+    }
+    unexpected.push(url); throw new Error(`Unexpected external call: ${url}`);
+  }, { preconnect: fetch.preconnect }));
+  await embedStage(f.env, "zip-photo");
+  expect(f.jobs).toEqual([{ type: "describe", memeId: "zip-photo", gen: 0 }]);
+  await describeStage(f.env, "zip-photo");
+  expect(calls).toEqual(["embed-image", "describe", "embed-text"]);
+  expect(await f.env.DB.prepare("SELECT status,import_id,title FROM memes WHERE id='zip-photo'").first<{ status: string; import_id: string | null; title: string | null }>())
+    .toEqual({ status: "ready", import_id: null, title: "ZIP otter" });
 });
 
 test("startup completes while best-effort Telegram failure notice is still pending", async () => {

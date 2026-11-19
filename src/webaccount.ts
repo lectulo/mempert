@@ -74,11 +74,12 @@ export async function handleAccount(req: Request, env: Env, user: User, parts: s
     }
   }
 
-  // Check the feature before billing or any side effects, including the Telegram retry notification.
-  const newBatch = m === "POST" && ((resource === "batch" && (id === "start" || id === "retry")) || (resource === "zip" && !id));
+  // Check the OpenRouter batch feature before billing or side effects. ZIP import keeps its own billing gate.
+  const newBatch = m === "POST" && resource === "batch" && (id === "start" || id === "retry");
   const closeBatch = m === "POST" && resource === "batch" && (id === "finish" || id === "cancel");
   if ((newBatch || closeBatch) && !batchEnabled(env)) return json({ error: "batch disabled" }, 403);
-  if (newBatch) {
+  const newZip = m === "POST" && resource === "zip" && !id;
+  if (newBatch || newZip) {
     const gate = await canUseAi(env.DB, user);
     if (!gate.ok) return json({ error: "payment required", reason: gate.reason }, 402);
   }
@@ -96,7 +97,7 @@ export async function handleAccount(req: Request, env: Env, user: User, parts: s
   }
 
   if (resource === "zip") {
-    if (m === "POST" && !id) {
+    if (newZip) {
       const zip = await createZipImport(env, user.id, lang);
       return json({ id: zip.id, url: zip.url });
     }

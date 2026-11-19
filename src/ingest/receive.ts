@@ -4,7 +4,7 @@ import { storageFull, type Kind } from "../db";
 import type { Env } from "../env";
 import { t } from "../i18n";
 import { sendSaveStatus } from "../savewidget";
-import { collectingImport } from "../batch";
+import { BATCH_DISABLED_ERROR, collectingImport } from "../batch";
 import { batchEnabled } from "../batchmode";
 import { addToPost } from "../channels";
 
@@ -186,10 +186,11 @@ export async function receiveMedia(
   const postId = await addToPost(db, ctx.user.id, { memeId, mediaGroupId: group, caption: msg.caption, position: link?.position ?? msg.message_id });
   const sendStatus = () => sendSaveStatus(ctx.api, ctx.user.id, ctx.lang, msg.message_id);
   const statusId = group ? await albumStatus(db, postId, sendStatus) : await sendStatus();
+  // An explicit retry should not wait on a stopped provider batch, even after re-enabling batches.
   const gen = await db
-    .prepare(`UPDATE memes SET status = 'embedding', error = NULL, ${batches ? "" : "import_id = NULL,"}
+    .prepare(`UPDATE memes SET status = 'embedding', error = NULL, import_id = CASE WHEN ? OR error = ? THEN NULL ELSE import_id END,
       status_msg_id = COALESCE(?, status_msg_id), updated_at = unixepoch() WHERE id = ? RETURNING gen`)
-    .bind(statusId, memeId)
+    .bind(!batches, BATCH_DISABLED_ERROR, statusId, memeId)
     .first<number>("gen");
   if (gen === null) return;
   // A link import without an ffmpeg preview makes it first (src/thumb.ts).

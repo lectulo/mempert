@@ -29,10 +29,10 @@ export const onUploadReady = (fn: (id: string) => void) => (readyListeners.add(f
 
 const isZip = (file: File) => /\.zip$/i.test(file.name) || /zip/.test(file.type);
 
-export function addFiles(files: Iterable<File>, allowZip: boolean) {
+export function addFiles(files: Iterable<File>) {
   for (const file of files) {
     const kind = isZip(file) ? "zip" : file.type.startsWith("image/") ? "image" : file.type.startsWith("video/") ? "video" : null;
-    if (!kind || (kind === "zip" && !allowZip)) continue;
+    if (!kind) continue;
     uploads.items.push({ key: nextKey++, name: file.name, kind, progress: 0, state: "queued" });
     const item = uploads.items[uploads.items.length - 1]; // the reactive proxy
     if (kind !== "zip" && file.size > LIMITS[kind]) {
@@ -104,6 +104,8 @@ async function runZip(item: UploadItem, file: File) {
     await ok(await fetch(at("complete"), { method: "POST", body: JSON.stringify({ parts }), headers: { "Content-Type": "application/json" } }));
     item.state = "processing";
     watch();
+    // Small archives can finish before the multipart completion response reaches us.
+    await pollZip(item).catch(() => {});
   } catch (e) {
     item.state = "error";
     item.error = e instanceof ApiError ? e.message : String(e);
@@ -112,6 +114,7 @@ async function runZip(item: UploadItem, file: File) {
 
 async function pollZip(item: UploadItem) {
   const z = await api.zipStatus(item.id!);
+  if (item.state !== "processing") return; // a concurrent push-triggered poll already settled the row
   if (z.total !== null) item.detail = `${z.imported}/${z.total}`;
   if (z.status === "done") {
     item.state = "ready";

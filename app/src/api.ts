@@ -110,7 +110,7 @@ export interface Me {
   describe_tier: "max" | "medium";
   hide_porn: boolean;
   blur_porn: boolean;
-  batch_enabled: boolean;
+  batch_enabled: boolean; // OpenRouter Batch, not ZIP import availability.
   key: boolean;
   models: Record<string, string>;
   billing: Billing;

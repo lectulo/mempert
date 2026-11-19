@@ -110,7 +110,7 @@ describe("web upload", () => {
 });
 
 describe("batch feature toggle", () => {
-  it("blocks stale batch mutations but leaves status and ordinary photo uploads available", async () => {
+  it("blocks stale batch mutations but leaves ZIP creation, status and ordinary photo uploads available", async () => {
     const disabled: Env = { ...e, BATCH_ENABLED: "false" };
     await e.DB.prepare("INSERT INTO users (id, role) VALUES (68, 'user')").run();
     await e.DB.prepare("INSERT INTO imports (id, user_id, status) VALUES ('collecting', 68, 'collecting'), ('submitted', 68, 'submitted')").run();
@@ -121,7 +121,7 @@ describe("batch feature toggle", () => {
 
     expect(await (await call("me")).json()).toMatchObject({ batch_enabled: false });
     expect(await (await call("me", undefined, { ...e, BATCH_ENABLED: undefined })).json()).toMatchObject({ batch_enabled: true });
-    for (const path of ["batch/start", "batch/finish", "batch/cancel", "batch/retry", "zip"]) {
+    for (const path of ["batch/start", "batch/finish", "batch/cancel", "batch/retry"]) {
       const res = await call(path, { method: "POST" });
       expect(res.status, path).toBe(403);
       expect(await res.json()).toEqual({ error: "batch disabled" });
@@ -131,6 +131,14 @@ describe("batch feature toggle", () => {
       recent: [{ id: "submitted", status: "submitted" }],
     });
     expect(await (await call("zip/unpacking")).json()).toMatchObject({ status: "running" });
+    const created = await call("zip", { method: "POST" });
+    expect(created.status).toBe(200);
+    const zip = await created.json<{ id: string; url: string }>();
+    const url = new URL(zip.url);
+    expect(url.origin + url.pathname).toBe(`https://m.example/upload/${zip.id}`);
+    expect(url.searchParams.get("s")).toBeTruthy();
+    expect(await (await call(`zip/${zip.id}`)).json()).toMatchObject({ id: zip.id, status: "uploading" });
+    expect(await e.DB.prepare("SELECT count(*) AS n FROM imports WHERE user_id = 68").first("n")).toBe(2);
 
     const body = new FormData();
     body.append("file", new File(["PNGDATA"], "batch-disabled.png", { type: "image/png" }));

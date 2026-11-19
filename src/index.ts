@@ -19,7 +19,7 @@ import { handleApp } from "./webapp";
 import { serveOpenapi } from "./openapi";
 import { billingNotices } from "./billing";
 import { handleBtcpay } from "./crypto";
-import { expireZipUploads, handleUpload, handleZipCallback, stopRunningZipImports } from "./zip";
+import { expireZipUploads, handleUpload, handleZipCallback } from "./zip";
 import { handleShare } from "./share";
 import { handleUploads, queueUploads, type UploadJob } from "./search/tgupload";
 import { flushBatchContinuations, stopUnsubmittedImports } from "./batch";
@@ -71,7 +71,6 @@ export default {
     batch.queue === "memesave-tgupload" ? handleUploads(batch as unknown as MessageBatch<UploadJob>, env) : handleBatch(batch, env),
   async scheduled(_, env) {
     await stopUnsubmittedImports(env);
-    await stopRunningZipImports(env);
     await flushBatchContinuations(env);
     await expireZipUploads(env.DB);
     await expireExports(env.DB);

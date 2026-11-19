@@ -32,10 +32,12 @@ describe("syncCommands", () => {
     for (const index of [0, 1, 2]) {
       const [enabledCommands] = api.setMyCommands.mock.calls[index];
       const [disabledCommands] = api.setMyCommands.mock.calls[index + 3];
-      expect(enabledCommands.map(({ command }) => command)).toEqual(expect.arrayContaining(BATCH_COMMANDS));
+      expect(enabledCommands.map(({ command }) => command)).toEqual(expect.arrayContaining([...BATCH_COMMANDS, "batch_zip"]));
       expect(disabledCommands).toEqual(enabledCommands.filter(({ command }) => !BATCH_COMMANDS.includes(command)));
+      expect(disabledCommands.map(({ command }) => command)).toContain("batch_zip");
     }
-    expect(api.setMyDescription).toHaveBeenNthCalledWith(3, expect.not.stringContaining("Import Telegram exports"), { language_code: undefined });
+    expect(api.setMyDescription).toHaveBeenNthCalledWith(3, expect.stringContaining("Import ZIP archives"), { language_code: undefined });
+    expect(api.setMyDescription).toHaveBeenNthCalledWith(4, expect.stringContaining("Импортируйте ZIP-архивы"), { language_code: "ru" });
     expect(await syncCommands(disabled, api as unknown as Api)).toBe(false);
     expect(await syncCommands(env, api as unknown as Api)).toBe(true);
   });

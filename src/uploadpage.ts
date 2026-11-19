@@ -58,8 +58,7 @@ zone.addEventListener("drop", (e) => { e.preventDefault(); delete zone.dataset.d
 `;
 
 /** Upload page for a Telegram export zip, styled with the cofob design system. */
-export function uploadPage(lang: Lang, open: boolean, disabled = false) {
-  open &&= !disabled;
+export function uploadPage(lang: Lang, open: boolean) {
   const s = (key: Parameters<typeof t>[1]) => esc(t(lang, key));
   const body = open
     ? `<label class="cf-file-upload" id="upload">
@@ -75,7 +74,7 @@ export function uploadPage(lang: Lang, open: boolean, disabled = false) {
       </div>
       <div class="cf-alert" data-tone="success" id="ok" hidden><div class="cf-alert__content"><p class="cf-alert__title">${s("page_done")}</p></div></div>
       <div class="cf-alert" data-tone="danger" id="err" hidden><div class="cf-alert__content"><p class="cf-alert__title">${s("page_error")}</p><p class="cf-alert__description" id="errmsg"></p></div></div>`
-    : `<div class="cf-alert" data-tone="warning"><div class="cf-alert__content"><p class="cf-alert__title">${disabled ? esc(t(lang, "batch_disabled").replace(/<[^>]*>/g, "")) : s("page_used")}</p></div></div>`;
+    : `<div class="cf-alert" data-tone="warning"><div class="cf-alert__content"><p class="cf-alert__title">${s("page_used")}</p></div></div>`;
   const html = `<!doctype html>
 <html lang="${lang}">
 <head>
@@ -88,12 +87,12 @@ export function uploadPage(lang: Lang, open: boolean, disabled = false) {
   <main class="cf-container cf-container--narrow cf-section">
     <div class="cf-stack">
       <h1 class="cf-heading cf-heading--2">${s("page_title")}</h1>
-      ${disabled ? "" : `<p class="cf-text cf-text--muted">${s("page_lead")}</p>`}
+      <p class="cf-text cf-text--muted">${s("page_lead")}</p>
       <div class="cf-card"><div class="cf-card__body cf-stack">${body}</div></div>
     </div>
   </main>
   ${open ? `<script>${SCRIPT}</script>` : ""}
 </body>
 </html>`;
-  return new Response(html, { status: disabled ? 403 : 200, headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
+  return new Response(html, { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
 }

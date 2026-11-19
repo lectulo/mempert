@@ -6,8 +6,8 @@ import type { Env } from "./env";
 import { publicWebAppUrl } from "./telegramurl";
 import { t, type Key, type Lang } from "./i18n";
 
-export const BATCH_COMMANDS = ["batch", "batch_zip", "batch_finish", "batch_cancel", "batch_status", "batch_retry"];
-const userCommands = (batch: boolean) => ["start", "help", "feed", "pair", "stats", "settings", "key", ...(batch ? BATCH_COMMANDS : []), "export", "delete", "delete_all", "channels", "e621", "mcp", "subscribe", "balance", "paysupport", "terms", "about"];
+export const BATCH_COMMANDS = ["batch", "batch_finish", "batch_cancel", "batch_status", "batch_retry"];
+const userCommands = (batch: boolean) => ["start", "help", "feed", "pair", "stats", "settings", "key", "batch_zip", ...(batch ? BATCH_COMMANDS : []), "export", "delete", "delete_all", "channels", "e621", "mcp", "subscribe", "balance", "paysupport", "terms", "about"];
 const adminCommands = (batch: boolean) => [...userCommands(batch), "grant", "revoke", "users"];
 
 const list = (names: string[], lang: Lang) =>
@@ -27,7 +27,7 @@ export async function syncCommands(env: Env, api: Api) {
   const admin = adminCommands(batch);
   const appUrl = `${env.PUBLIC_URL.replace(/\/$/, "")}/`;
   const webApp = publicWebAppUrl(env);
-  const about = (lang: Lang) => [t(lang, "bot_description", { batch: batch ? t(lang, "bot_description_batch") : "" }), t(lang, "bot_short_description")];
+  const about = (lang: Lang) => [t(lang, "bot_description"), t(lang, "bot_short_description")];
   const hash = await sha256hex(JSON.stringify([list(admin, "en"), list(admin, "ru"), appUrl, about("en"), about("ru")]));
   const old = await env.DB.prepare("SELECT value FROM meta WHERE key = 'commands_hash'").first<string>("value");
   if (old === hash) return false;

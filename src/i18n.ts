@@ -33,8 +33,7 @@ Try it now: forward a meme from any chat.`,
   start_share: "📤 Search in a chat",
   start_help: "💡 How to use",
   first_meme: `\n\n${E.help} Your first meme! Now find it: send a word from it here, or type <code>@{bot}</code> and a word in any chat.`,
-  bot_description: "I save your memes and find them later by text, meaning or mood.\n\n• Forward photos, videos and GIFs: AI reads the text and writes what each meme means.\n• Search here, in the web app, or inline in any chat.\n• {batch}Auto-post to channels and connect AI apps.\n\nPress Start and forward your first meme.",
-  bot_description_batch: "Import Telegram exports. ",
+  bot_description: "I save your memes and find them later by text, meaning or mood.\n\n• Forward photos, videos and GIFs: AI reads the text and writes what each meme means.\n• Search here, in the web app, or inline in any chat.\n• Import ZIP archives, including Telegram exports.\n• Auto-post to channels and connect AI apps.\n\nPress Start and forward your first meme.",
   bot_short_description: "Save memes and find them by text, meaning or mood. Inline search in any chat.",
   help: `${E.help} <b>How to use</b>
 Forward a photo, video or GIF to save it. Send text to search: a caption fragment, a description, a template name or a mood.
@@ -43,6 +42,7 @@ Forward a photo, video or GIF to save it. Send text to search: a caption fragmen
 /settings — chat search mode
 /delete — reply to a meme to remove it
 /key — use your own OpenRouter account{batch}
+/batch_zip — import a .zip with media or a Telegram chat export, or restore a memesave export
 /export — download all your data as a .zip
 /delete_all — delete your account and all data
 /channels — auto-post new memes to your channels
@@ -52,7 +52,6 @@ Forward a photo, video or GIF to save it. Send text to search: a caption fragmen
 /about — what the bot stores`,
   help_batch: `
 /batch — cheap bulk import of photos (results in minutes to hours)
-/batch_zip — import a .zip with media or a Telegram chat export
 /batch_status — batch progress
 /batch_retry — retry failed memes`,
   help_admin: `
@@ -119,7 +118,7 @@ Average per meme: {avg}`,
   batch_started: `${E.indexing} <b>Batch mode on.</b> Forward photos, then send /batch_finish. Photos are described at half price, usually within minutes, max 24–96 h. Videos and GIFs are indexed right away as usual. /batch_cancel to stop.`,
   batch_open: `${E.indexing} Batch mode is already on: {n} photos. Send /batch_finish when done.`,
   batch_off: `${E.help} Batch mode is off. Start it with /batch.`,
-  batch_disabled: `${E.help} Batch imports are disabled on this bot.`,
+  batch_disabled: `${E.help} OpenRouter batch processing is disabled on this bot. You can still import an archive with /batch_zip.`,
   batch_empty: `${E.notFound} No photos in this batch.`,
   batch_finishing: `${E.indexing} Submitting {n} photos…`,
   batch_submitted: `${E.indexing} Batch with {n} photos submitted. I will tell you when it is done.`,
@@ -128,7 +127,7 @@ Average per meme: {avg}`,
   batch_failed: `${E.error} Batch failed. {n} photos sent to normal processing.{error}`,
   batch_cancelled: `${E.done} Batch mode off. {n} photos are indexed normally.`,
   batch_stopped: `${E.error} <b>Batch stopped:</b> {ok} photos described, {n} failed: <i>{reason}</i>
-They were not sent to full-price processing. Fix the cause, then run /batch_retry to retry them as a batch.`,
+They were not sent to full-price processing. If OpenRouter batch processing is available, fix the cause and run /batch_retry to retry them as a batch.`,
   batch_status_title: `${E.stats} <b>Batches</b>`,
   batch_status_none: `${E.help} No batches yet. Start one with /batch or /batch_zip.`,
   batch_status_collecting: "Batch mode on: {n} photos collected (/batch_finish to submit).",
@@ -138,6 +137,7 @@ They were not sent to full-price processing. Fix the cause, then run /batch_retr
   batch_retry_none: `${E.notFound} No failed memes.`,
   batch_retry_started: `${E.indexing} Retrying {photos} photos as a half-price batch and {others} videos/GIFs normally…`,
   zip_link: `${E.indexing} Upload a .zip with the button: any archive with photos, videos and GIFs, a Telegram Desktop chat export (<b>HTML</b> or <b>JSON</b>), or a memesave /export (restored without AI processing). The type is detected automatically. The link works for 24 h. Photos are described in a half-price batch automatically; videos and GIFs are indexed right away.`,
+  zip_link_regular: `${E.indexing} Upload a .zip with the button: any archive with photos, videos and GIFs, a Telegram Desktop chat export (<b>HTML</b> or <b>JSON</b>), or a memesave /export (restored without AI processing). The type is detected automatically. The link works for 24 h. New media are indexed at standard rates; there is no batch discount.`,
   zip_button: "Upload .zip",
   app_button: "Open App",
   feed_empty: "No memes yet. Send me some, then scroll them here with /feed.",
@@ -161,6 +161,7 @@ They were not sent to full-price processing. Fix the cause, then run /batch_retr
   fmt_tiktok: "tiktok-sync likes",
   fmt_memesave: "memesave export",
   zip_done: `${E.done} <b>Archive imported:</b> {imported} new memes, {skipped} duplicates skipped, {failed} failed. Photos are submitted as a half-price batch; I will tell you when it is done.`,
+  zip_done_regular: `${E.done} <b>Archive imported:</b> {imported} new memes, {skipped} duplicates skipped, {failed} failed. Media sent for AI processing use standard rates.`,
   zip_failed: `${E.error} Archive import failed: {error}`,
   export_started: `${E.indexing} Preparing your data export: memes, metadata, embeddings and all files. I will send a link when the .zip is ready.`,
   export_limit: `${E.help} One export per day. The next one is possible after {time}.`,
@@ -174,7 +175,7 @@ To confirm, send <code>/delete_all {confirm}</code>`,
   delete_all_done: `${E.deleted} Account deleted. Files are removed in the background within minutes. Write again any time to start over as a new user.`,
   export_failed: `${E.error} Data export failed: {error}. You can try /export again.`,
   page_title: "Import a .zip",
-  page_lead: "Upload any .zip with photos, videos and GIFs, or a chat exported from Telegram Desktop (HTML or JSON); the type is detected automatically. Unique media are added to your collection.",
+  page_lead: "Upload a ZIP with photos, videos or GIFs, a Telegram Desktop chat export (HTML or JSON), or a memesave data export. The type is detected automatically; you can restore a memesave export without AI processing.",
   page_drop: "Choose or drop a .zip file",
   page_hint: "Large files are uploaded in parts. Keep this page open until the upload ends.",
   page_done: "Upload complete. You can return to Telegram: the bot shows the progress.",
@@ -693,8 +694,7 @@ const ru: Record<Key, string> = {
   start_share: "📤 Поиск в другом чате",
   start_help: "💡 Как пользоваться",
   first_meme: `\n\n${E.help} Ваш первый мем! Теперь найдите его: отправьте сюда слово из него или напишите <code>@{bot}</code> и слово в любом чате.`,
-  bot_description: "Я сохраняю ваши мемы и нахожу их потом по тексту, смыслу или настроению.\n\n• Пересылайте фото, видео и GIF: ИИ читает текст и пишет, что значит каждый мем.\n• Ищите здесь, в веб-приложении или inline в любом чате.\n• {batch}Автопостинг в каналы и подключение ИИ-приложений.\n\nНажмите «Начать» и перешлите первый мем.",
-  bot_description_batch: "Импорт архивов из Telegram. ",
+  bot_description: "Я сохраняю ваши мемы и нахожу их потом по тексту, смыслу или настроению.\n\n• Пересылайте фото, видео и GIF: ИИ читает текст и пишет, что значит каждый мем.\n• Ищите здесь, в веб-приложении или inline в любом чате.\n• Импортируйте ZIP-архивы, включая экспорт из Telegram.\n• Настраивайте автопостинг в каналы и подключайте ИИ-приложения.\n\nНажмите «Начать» и перешлите первый мем.",
   bot_short_description: "Сохраняйте мемы и находите их по тексту, смыслу или настроению. Inline-поиск в любом чате.",
   help: `${E.help} <b>Как пользоваться</b>
 Перешлите фото, видео или GIF, чтобы сохранить. Отправьте текст для поиска: фрагмент подписи, описание, название шаблона или настроение.
@@ -703,6 +703,7 @@ const ru: Record<Key, string> = {
 /settings — режим поиска в чате
 /delete — ответьте на мем, чтобы удалить
 /key — свой аккаунт OpenRouter{batch}
+/batch_zip — импорт .zip с медиа или экспорта чата Telegram, восстановление экспорта memesave
 /export — скачать все ваши данные в .zip
 /delete_all — удалить аккаунт и все данные
 /channels — автопостинг новых мемов в ваши каналы
@@ -712,7 +713,6 @@ const ru: Record<Key, string> = {
 /about — что хранит бот`,
   help_batch: `
 /batch — дешёвый массовый импорт фото (результат от минут до часов)
-/batch_zip — импорт .zip с медиа или экспорта чата Telegram
 /batch_status — прогресс пакетов
 /batch_retry — повторить мемы с ошибкой`,
   help_admin: `
@@ -779,7 +779,7 @@ const ru: Record<Key, string> = {
   batch_started: `${E.indexing} <b>Пакетный режим включён.</b> Пересылайте фото, затем отправьте /batch_finish. Фото описываются за полцены, обычно за минуты, максимум 24–96 ч. Видео и GIF индексируются сразу, как обычно. /batch_cancel — выключить.`,
   batch_open: `${E.indexing} Пакетный режим уже включён: {n} фото. Отправьте /batch_finish, когда закончите.`,
   batch_off: `${E.help} Пакетный режим выключен. Включите его командой /batch.`,
-  batch_disabled: `${E.help} Пакетный импорт в этом боте отключён.`,
+  batch_disabled: `${E.help} Пакетная обработка OpenRouter в этом боте отключена. Архивы по-прежнему можно импортировать командой /batch_zip.`,
   batch_empty: `${E.notFound} В пакете нет фото.`,
   batch_finishing: `${E.indexing} Отправляю {n} фото…`,
   batch_submitted: `${E.indexing} Пакет из {n} фото отправлен. Я напишу, когда он будет готов.`,
@@ -788,7 +788,7 @@ const ru: Record<Key, string> = {
   batch_failed: `${E.error} Пакет не удался. {n} фото отправлено на обычную обработку.{error}`,
   batch_cancelled: `${E.done} Пакетный режим выключен. {n} фото проиндексируются обычным способом.`,
   batch_stopped: `${E.error} <b>Пакет остановлен:</b> описано {ok} фото, {n} с ошибкой: <i>{reason}</i>
-Они не отправлены на обработку по полной цене. Устраните причину и запустите /batch_retry, чтобы повторить их пакетом.`,
+Они не отправлены на обработку по полной цене. Если пакетная обработка OpenRouter доступна, устраните причину и запустите /batch_retry, чтобы повторить их пакетом.`,
   batch_status_title: `${E.stats} <b>Пакеты</b>`,
   batch_status_none: `${E.help} Пакетов пока нет. Начните с /batch или /batch_zip.`,
   batch_status_collecting: "Пакетный режим включён: собрано фото: {n} (/batch_finish — отправить).",
@@ -798,6 +798,7 @@ const ru: Record<Key, string> = {
   batch_retry_none: `${E.notFound} Мемов с ошибкой нет.`,
   batch_retry_started: `${E.indexing} Повторяю {photos} фото пакетом за полцены и {others} видео/GIF обычным способом…`,
   zip_link: `${E.indexing} Загрузите .zip по кнопке: любой архив с фото, видео и GIF, экспорт чата из Telegram Desktop (<b>HTML</b> или <b>JSON</b>) или /export из memesave (восстанавливается без AI-обработки). Тип определяется автоматически. Ссылка работает 24 ч. Фото автоматически описываются пакетом за полцены; видео и GIF индексируются сразу.`,
+  zip_link_regular: `${E.indexing} Загрузите .zip по кнопке: любой архив с фото, видео и GIF, экспорт чата из Telegram Desktop (<b>HTML</b> или <b>JSON</b>) или /export из memesave (восстанавливается без ИИ-обработки). Тип определяется автоматически. Ссылка работает 24 ч. Новые медиа индексируются по обычной цене, без пакетной скидки.`,
   zip_button: "Загрузить .zip",
   app_button: "Открыть приложение",
   feed_empty: "Мемов пока нет. Пришлите мне несколько, потом листайте их здесь через /feed.",
@@ -821,6 +822,7 @@ const ru: Record<Key, string> = {
   fmt_tiktok: "лайки tiktok-sync",
   fmt_memesave: "экспорт memesave",
   zip_done: `${E.done} <b>Архив импортирован:</b> {imported} новых мемов, {skipped} дубликатов пропущено, {failed} с ошибкой. Фото отправлены пакетом за полцены; я напишу, когда он будет готов.`,
+  zip_done_regular: `${E.done} <b>Архив импортирован:</b> {imported} новых мемов, {skipped} дубликатов пропущено, {failed} с ошибкой. Медиа, отправленные на ИИ-обработку, индексируются по обычной цене.`,
   zip_failed: `${E.error} Импорт архива не удался: {error}`,
   export_started: `${E.indexing} Готовлю экспорт ваших данных: мемы, метаданные, эмбеддинги и все файлы. Пришлю ссылку, когда .zip будет готов.`,
   export_limit: `${E.help} Экспорт можно делать раз в день. Следующий — после {time}.`,
@@ -834,7 +836,7 @@ const ru: Record<Key, string> = {
   delete_all_done: `${E.deleted} Аккаунт удалён. Файлы удаляются в фоне в течение нескольких минут. Напишите в любой момент, чтобы начать заново как новый пользователь.`,
   export_failed: `${E.error} Экспорт данных не удался: {error}. Попробуйте /export ещё раз.`,
   page_title: "Импорт .zip",
-  page_lead: "Загрузите любой .zip с фото, видео и GIF или чат, экспортированный из Telegram Desktop (HTML или JSON); тип определяется автоматически. Уникальные медиа добавятся в вашу коллекцию.",
+  page_lead: "Загрузите ZIP-архив с фото, видео или GIF, экспорт чата из Telegram Desktop (HTML или JSON) или экспорт данных memesave. Тип определяется автоматически; экспорт memesave можно восстановить без ИИ-обработки.",
   page_drop: "Выберите или перетащите .zip",
   page_hint: "Большие файлы загружаются частями. Не закрывайте страницу до конца загрузки.",
   page_done: "Загрузка завершена. Можно вернуться в Telegram: бот покажет прогресс.",

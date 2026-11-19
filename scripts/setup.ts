@@ -47,7 +47,9 @@ export function webhookConfig(env: NodeJS.ProcessEnv, args: string[]) {
 
 export async function setup(env: NodeJS.ProcessEnv, args: string[], request?: typeof fetch, log: (message: string) => void = console.log) {
   const mode = env.TELEGRAM_MODE || "polling";
-  const commands = batchEnabled({ BATCH_ENABLED: env.BATCH_ENABLED }) ? "including batch commands" : "without batch commands";
+  const commands = batchEnabled({ BATCH_ENABLED: env.BATCH_ENABLED })
+    ? "including ZIP import and OpenRouter batch commands"
+    : "including ZIP import, without OpenRouter batch commands";
   if (mode !== "polling" && mode !== "webhook") throw new Error("TELEGRAM_MODE must be polling or webhook.");
   if (mode === "polling") {
     if (args.includes("--drop-pending-updates")) throw new Error("--drop-pending-updates is not allowed in polling mode; pending updates are preserved.");

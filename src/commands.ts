@@ -186,7 +186,7 @@ export function registerCommands<C extends Ctx>(bot: Composer<C>, env: Env) {
 
   bot.command("key", (ctx) => replyKey(ctx, env));
 
-  // Telegram may still offer commands from a cached menu or a previous message.
+  // Telegram may offer cached provider commands. /batch_zip is an ordinary import and is not guarded here.
   bot.command(BATCH_COMMANDS, (ctx, next) => batchEnabled(env) ? next() : ctx.reply(t(ctx.lang, "batch_disabled"), html));
 
   bot.command("batch", async (ctx) => {

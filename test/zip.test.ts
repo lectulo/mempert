@@ -133,4 +133,28 @@ describe("zip import", () => {
     expect(await e.DB.prepare("SELECT source, source_meta FROM memes WHERE id = ?").bind(a).first()).toEqual({ source: "https://e621.net/posts/7", source_meta: null });
     expect(jobs).toHaveLength(2);
   });
+
+  it("accepts worker files and queues photos normally with Batch disabled", async () => {
+    const { e, jobs } = setup();
+    e.BATCH_ENABLED = "false";
+    const zip = await createZipImport(e, 35, "en");
+    await e.DB.prepare("UPDATE zip_imports SET status = 'running' WHERE id = ?").bind(zip.id).run();
+    const token = await sign(e, `zip|${zip.id}`);
+    await e.MEDIA.put(`tmp/zip/${zip.id}.zip`, "archive");
+    const url = `https://m.example/zip/${zip.id}`;
+    const file = await handleZipCallback(new Request(`${url}/file`, { headers: { Authorization: `Bearer ${token}` } }), e);
+    expect(await file.text()).toBe("archive");
+    const blob = await handleZipCallback(new Request(`${url}/blob/${sha("e")}`, {
+      method: "PUT", headers: { Authorization: `Bearer ${token}`, "Content-Type": "image/jpeg" }, body: "PHOTO",
+    }), e);
+    expect(blob.status).toBe(200);
+    expect(await (await e.MEDIA.get(`u/35/${sha("e")}.jpg`))!.text()).toBe("PHOTO");
+    expect((await call(e, zip.id, "items", { items: [item(sha("e"), "photo")] }, "bad")).status).toBe(403);
+    expect((await call(e, zip.id, "items", { items: [item(sha("e"), "photo")] }, token)).status).toBe(200);
+    expect((await call(e, zip.id, "done", {}, token)).status).toBe(200);
+    const meme = await e.DB.prepare("SELECT id, import_id, status FROM memes WHERE user_id = 35").first<{ id: string }>();
+    expect(meme).toMatchObject({ import_id: null, status: "embedding" });
+    expect(jobs).toEqual([{ type: "embed", memeId: meme!.id }]);
+    expect(await e.DB.prepare("SELECT 1 FROM imports WHERE user_id = 35").first()).toBeNull();
+  });
 });

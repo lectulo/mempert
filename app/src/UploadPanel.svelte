@@ -56,7 +56,11 @@
               {:else if item.state === "batched"}
                 <span class="hint">{stateLabel.batched}</span><Clock size={18} />
               {:else if item.state === "ready"}
-                <CircleCheck size={20} class="ok" aria-label={stateLabel.ready} />
+                {#if item.kind === "zip"}
+                  <span class="hint">{s.zipImported}</span><CircleCheck size={20} class="ok" aria-hidden="true" />
+                {:else}
+                  <CircleCheck size={20} class="ok" aria-label={stateLabel.ready} />
+                {/if}
               {:else if item.state === "error"}
                 <CircleAlert size={20} class="bad" aria-label={item.error ?? stateLabel.error} />
               {:else}

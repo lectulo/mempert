@@ -50,15 +50,15 @@ for (const origin of ["http://localhost:3000", "https://bot.example"]) {
 }
 
 for (const lang of ["en", "ru"] as const) {
-  test(`disabled batch blocks stale commands and hides Telegram help links (${lang})`, async () => {
+  test(`disabled batch blocks provider commands but keeps Telegram ZIP import (${lang})`, async () => {
     const bot = new Bot<Ctx>("1:offline", { botInfo: {
       id: 1, is_bot: true, first_name: "Offline", username: "offline_bot",
     } as any });
-    const messages: string[] = [];
+    const messages: { text: string; reply_markup?: { inline_keyboard: { text: string; url: string }[][] } }[] = [];
     bot.api.config.use(async (_prev, method, payload) => {
       if (method === "answerCallbackQuery") return { ok: true, result: true } as any;
       if (method !== "sendMessage") throw new Error(`Unexpected API method ${method}`);
-      messages.push((payload as { text: string }).text);
+      messages.push(payload as (typeof messages)[number]);
       return { ok: true, result: { message_id: 100 } } as any;
     });
     bot.use(async (ctx, next) => {
@@ -66,11 +66,13 @@ for (const lang of ["en", "ru"] as const) {
       ctx.user = { id: 10, role: "admin", describe_tier: "medium" } as Ctx["user"];
       await next();
     });
-    // No DB or queue bindings: a disabled batch handler must not reach either.
-    registerCommands(bot, { BATCH_ENABLED: "false" } as Env);
+    // Only ZIP may reach the database; the provider batch commands must return before any side effects.
+    const writes: { sql: string; args: unknown[] }[] = [];
+    const DB = { prepare: (sql: string) => ({ bind: (...args: unknown[]) => ({ run: async () => { writes.push({ sql, args }); } }) }) };
+    registerCommands(bot, { BATCH_ENABLED: "false", PUBLIC_URL: "https://bot.example", ENCRYPTION_KEY: "test-key", DB } as unknown as Env);
     const from = { id: 10, is_bot: false, first_name: "Tester", language_code: lang };
     const chat = { id: 10, type: "private", first_name: "Tester" } as const;
-    const commands = ["batch", "batch_zip", "batch_finish", "batch_cancel", "batch_status", "batch_retry"];
+    const commands = ["batch", "batch_finish", "batch_cancel", "batch_status", "batch_retry"];
     for (const [index, command] of [...commands, "help", "about"].entries()) {
       await bot.handleUpdate({ update_id: index + 1, message: {
         message_id: index + 1, date: 1, chat, from,
@@ -81,12 +83,29 @@ for (const lang of ["en", "ru"] as const) {
       id: "old-help-button", from, chat_instance: "offline", data: "help",
       message: { message_id: 1, date: 1, chat, text: "Start" },
     } });
-    expect(messages.slice(0, commands.length)).toEqual(commands.map(() => t(lang, "batch_disabled")));
+    expect(messages.slice(0, commands.length).map(({ text }) => text)).toEqual(commands.map(() => t(lang, "batch_disabled")));
     expect(messages).toHaveLength(commands.length + 3);
-    expect(messages[commands.length]).toContain("/grant");
-    for (const text of messages.slice(commands.length)) {
-      expect(text).not.toContain("/batch");
+    expect(messages[commands.length].text).toContain("/grant");
+    expect(messages[commands.length].text).toContain("/batch_zip —");
+    expect(messages[commands.length + 2].text).toContain("/batch_zip —");
+    for (const { text } of messages.slice(commands.length)) {
+      expect(text).not.toMatch(/\/batch\b|\/batch_(finish|cancel|status|retry)\b/);
       expect(text).toContain("/settings");
     }
+    expect(writes).toEqual([]);
+
+    await bot.handleUpdate({ update_id: 11, message: {
+      message_id: 2, date: 1, chat, from,
+      text: "/batch_zip", entities: [{ type: "bot_command", offset: 0, length: "/batch_zip".length }],
+    } });
+    const [created, status] = writes;
+    expect(writes).toHaveLength(2);
+    expect(created.sql).toMatch(/^INSERT INTO zip_imports/);
+    expect(status.sql).toMatch(/^UPDATE zip_imports SET status_msg_id/);
+    expect(status.args).toEqual([100, created.args[0]]);
+    expect(messages.at(-1)).toMatchObject({
+      text: t(lang, "zip_link_regular"),
+      reply_markup: { inline_keyboard: [[{ text: t(lang, "zip_button"), url: expect.stringContaining(`https://bot.example/upload/${created.args[0]}?`) }]] },
+    });
   });
 }
