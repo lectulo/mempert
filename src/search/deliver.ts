@@ -6,6 +6,7 @@ import { blursPorn, type Meme } from "../db";
 import { botApi } from "../botapi";
 import { telegramClientOptions } from "../telegramproxy";
 import type { Env } from "../env";
+import { publicWebAppUrl } from "../telegramurl";
 import { t, type Lang } from "../i18n";
 import { extractMedia } from "../ingest/receive";
 import { memeMedia, signedMediaUrl, variantOf } from "../media";
@@ -135,6 +136,7 @@ export async function sendResults(env: Env, api: Api, chatId: number, replyTo: n
 
 /** Albums and comics among the results: buttons that open them in the web app (a chat shows only the found pages). */
 async function sendAlbumLinks(env: Env, api: Api, chatId: number, memes: Meme[], lang: Lang, other: object) {
+  if (!publicWebAppUrl(env)) return;
   const seen = new Set<string>();
   const rows = [];
   for (const m of memes) {

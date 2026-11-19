@@ -54,7 +54,7 @@ const noKeyboard = { ...html, reply_markup: { remove_keyboard: true } } as const
 
 const answerMarkup = (env: Env, lang: Lang, name: string, id: string, ok: boolean) => ({
   ...html,
-  reply_markup: { inline_keyboard: ok ? [[statsButton(env, t(lang, "pair_btn_stats", { name }), id)]] : [] },
+  reply_markup: { inline_keyboard: ok ? [statsButton(env, t(lang, "pair_btn_stats", { name }), id)].filter(row => row.length) : [] },
 });
 
 /** The invited user answered (bot or app): the inviter hears back; on yes both get the card and the analysis starts, paid by the inviter. */
@@ -104,7 +104,7 @@ async function pairsCard(env: Env, userId: number, lang: Lang) {
   const lines = pairs.map((p) => {
     const name = who(lang, p);
     if (p.status === "active") {
-      rows.push([statsButton(env, t(lang, "pair_btn_stats", { name }), p.id), { text: t(lang, "pair_btn_card"), callback_data: `pair:card:${p.id}` }, { text: t(lang, "pair_btn_analysis"), callback_data: `pair:run:${p.id}` }]);
+      rows.push([...statsButton(env, t(lang, "pair_btn_stats", { name }), p.id), { text: t(lang, "pair_btn_card"), callback_data: `pair:card:${p.id}` }, { text: t(lang, "pair_btn_analysis"), callback_data: `pair:run:${p.id}` }]);
       rows.push([
         pairButton(p.id, "mix", t(lang, "pair_btn_feed")),
         { text: t(lang, "pair_btn_quiz"), callback_data: `pair:quiz:${p.id}` },

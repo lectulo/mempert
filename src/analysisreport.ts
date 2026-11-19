@@ -8,6 +8,7 @@ import type { userAnalytics } from "./analytics";
 import { botApi } from "./botapi";
 import { getUser, userLang } from "./db";
 import type { Env } from "./env";
+import { publicWebAppUrl } from "./telegramurl";
 import { fileSize, t, usd, type Key, type Lang } from "./i18n";
 import type { userStats } from "./stats";
 
@@ -200,7 +201,7 @@ export async function sendReport(env: Env, analysisId: string, msgId?: number) {
   const app = { text: t(lang, "app_button"), web_app: { url: `${env.PUBLIC_URL.replace(/\/$/, "")}/` } };
   const replyTo = msgId ?? a.status_msg_id;
   await botApi(env.BOT_TOKEN).sendRichMessage(user.id, { markdown, media }, {
-    reply_markup: { inline_keyboard: [[app]] },
+    ...(publicWebAppUrl(env) ? { reply_markup: { inline_keyboard: [[app]] } } : {}),
     ...(replyTo && { reply_parameters: { message_id: replyTo, allow_sending_without_reply: true } }),
   });
 }

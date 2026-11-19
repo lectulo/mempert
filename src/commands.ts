@@ -4,6 +4,7 @@ import type { Ctx } from "./bot";
 import { DESCRIBE_MODELS, MODELS } from "./config";
 import { deleteMeme, type User } from "./db";
 import type { Env } from "./env";
+import { publicWebAppUrl } from "./telegramurl";
 import { EMOJI, esc, fileSize, t, usd, type Lang } from "./i18n";
 import { oauthUrl, setUserKey } from "./userkey";
 import { allStats, userStats } from "./stats";
@@ -90,9 +91,9 @@ export function registerCommands<C extends Ctx>(bot: Composer<C>, env: Env) {
       return ctx.reply(card.text, { ...html, reply_markup: card.reply_markup });
     }
     if (ctx.match === "pair" || ctx.match.startsWith("pair_")) return pairStart(ctx, env, ctx.match);
-    const app = { text: t(ctx.lang, "app_button"), web_app: { url: `${env.PUBLIC_URL.replace(/\/$/, "")}/` } };
+    const appUrl = publicWebAppUrl(env);
     const keyboard = [
-      [app],
+      ...(appUrl ? [[{ text: t(ctx.lang, "app_button"), web_app: { url: appUrl } }]] : []),
       [
         { text: t(ctx.lang, "start_try"), switch_inline_query_current_chat: "" },
         { text: t(ctx.lang, "start_share"), switch_inline_query: "" },
@@ -116,8 +117,8 @@ export function registerCommands<C extends Ctx>(bot: Composer<C>, env: Env) {
   });
 
   bot.command("mcp", (ctx) => {
-    const app = { text: t(ctx.lang, "app_button"), web_app: { url: `${env.PUBLIC_URL.replace(/\/$/, "")}/` } };
-    return ctx.reply(t(ctx.lang, "mcp", { url: `${env.PUBLIC_URL.replace(/\/$/, "")}/mcp` }), { ...html, reply_markup: { inline_keyboard: [[app]] } });
+    const appUrl = publicWebAppUrl(env);
+    return ctx.reply(t(ctx.lang, "mcp", { url: `${env.PUBLIC_URL.replace(/\/$/, "")}/mcp` }), { ...html, ...(appUrl ? { reply_markup: { inline_keyboard: [[{ text: t(ctx.lang, "app_button"), web_app: { url: appUrl } }]] } } : {}) });
   });
 
   bot.command("about", (ctx) =>

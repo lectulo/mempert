@@ -5,6 +5,7 @@ import { telegramClientOptions } from "./telegramproxy";
 import type { Ctx } from "./bot";
 import { userLang, type Meme } from "./db";
 import type { Env } from "./env";
+import { publicWebAppUrl } from "./telegramurl";
 import { esc, t, type Lang } from "./i18n";
 import { sendAlbum, sendMeme } from "./search/deliver";
 import { shareLinks } from "./share";
@@ -296,7 +297,7 @@ async function channelsCard(env: Env, api: Api, userId: number, lang: Lang) {
     { text: t(lang, "channel_btn_caption"), callback_data: `ch:c:${ch.chat_id}` },
     { text: t(lang, "channel_btn_unlink"), callback_data: `ch:d:${ch.chat_id}` },
   ]);
-  if (channels.length) rows.push([{ text: t(lang, "channel_btn_filters"), web_app: { url: `${env.PUBLIC_URL.replace(/\/$/, "")}/?account=settings` } }]);
+  if (channels.length && publicWebAppUrl(env)) rows.push([{ text: t(lang, "channel_btn_filters"), web_app: { url: `${env.PUBLIC_URL.replace(/\/$/, "")}/?account=settings` } }]);
   rows.push([{ text: t(lang, "channel_btn_add"), url: addChannelUrl(me.username) }]);
   return { text: t(lang, channels.length ? "channels" : "channels_none"), reply_markup: { inline_keyboard: rows } };
 }

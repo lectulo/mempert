@@ -2,6 +2,7 @@ import type { Api } from "grammy";
 import { sha256hex } from "./cache";
 import type { Role } from "./db";
 import type { Env } from "./env";
+import { publicWebAppUrl } from "./telegramurl";
 import { t, type Key, type Lang } from "./i18n";
 
 const USER_COMMANDS = ["start", "help", "feed", "pair", "stats", "settings", "key", "batch", "batch_zip", "batch_finish", "batch_cancel", "batch_status", "batch_retry", "export", "delete", "delete_all", "channels", "e621", "mcp", "subscribe", "balance", "paysupport", "terms", "about"];
@@ -20,12 +21,15 @@ export async function setCommandScope(api: Api, chatId: number, role: Role, lang
 /** Sets bot command menus when the command list or texts changed since the last sync. */
 export async function syncCommands(env: Env, api: Api) {
   const appUrl = `${env.PUBLIC_URL.replace(/\/$/, "")}/`;
+  const webApp = publicWebAppUrl(env);
   const about = (lang: Lang) => [t(lang, "bot_description"), t(lang, "bot_short_description")];
   const hash = await sha256hex(JSON.stringify([list(ADMIN_COMMANDS, "en"), list(ADMIN_COMMANDS, "ru"), appUrl, about("en"), about("ru")]));
   const old = await env.DB.prepare("SELECT value FROM meta WHERE key = 'commands_hash'").first<string>("value");
   if (old === hash) return false;
 
-  await api.setChatMenuButton({ menu_button: { type: "web_app", text: "Open App", web_app: { url: appUrl } } });
+  await api.setChatMenuButton({ menu_button: webApp
+    ? { type: "web_app", text: "Open App", web_app: { url: appUrl } }
+    : { type: "commands" } });
   await api.setMyCommands(list(USER_COMMANDS, "en"));
   await api.setMyCommands(list(USER_COMMANDS, "ru"), { language_code: "ru" });
   for (const lang of ["en", "ru"] as const) {

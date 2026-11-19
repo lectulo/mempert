@@ -4,6 +4,7 @@ import { charts, md, table } from "./analysisreport";
 import { botApi } from "./botapi";
 import { userLang } from "./db";
 import type { Env } from "./env";
+import { publicWebAppUrl } from "./telegramurl";
 import { t, type Key, type Lang } from "./i18n";
 import type { PairResult } from "./pairfacts";
 
@@ -68,7 +69,7 @@ export async function sendPairReport(env: Env, analysisId: string, msgId?: numbe
       const markdown = pairMarkdown(lang, r, (name, caption) => img.image(name, t(lang, caption)), !hidden);
       const replyTo = id === a.user_id && (msgId ?? a.status_msg_id);
       await botApi(env.BOT_TOKEN).sendRichMessage(id, { markdown, media: await img.media(env, a.id) }, {
-        reply_markup: { inline_keyboard: [[{ text: t(lang, "prep_open"), web_app: { url } }]] },
+        ...(publicWebAppUrl(env) ? { reply_markup: { inline_keyboard: [[{ text: t(lang, "prep_open"), web_app: { url } }]] } } : {}),
         ...(replyTo && { reply_parameters: { message_id: replyTo, allow_sending_without_reply: true } }),
       });
     }),

@@ -5,6 +5,7 @@ import { langOfUser } from "./billing";
 import { botApi } from "./botapi";
 import type { User } from "./db";
 import type { Env } from "./env";
+import { publicWebAppUrl } from "./telegramurl";
 import { esc, t, type Lang } from "./i18n";
 import type { PairResult } from "./pairfacts";
 import type { Pair } from "./pairs";
@@ -12,7 +13,7 @@ import { pairStats } from "./pairstats";
 import { editSharedWidget, progressApi, sendSharedWidget, sendWidget, type WidgetQuery } from "./widget";
 import { pairPage, pairsListPage, quizPage } from "./widgetpages";
 
-export const statsButton = (env: Env, text: string, id: string): InlineKeyboardButton => ({ text, web_app: { url: `${env.PUBLIC_URL.replace(/\/$/, "")}/?pair=${id}` } });
+export const statsButton = (env: Env, text: string, id: string): InlineKeyboardButton[] => publicWebAppUrl(env) ? [{ text, web_app: { url: `${env.PUBLIC_URL.replace(/\/$/, "")}/?pair=${id}` } }] : [];
 
 /** A short hash of a page: a sent widget keeps its HTML, so a new page needs a new shared widget. */
 const rev = (html: string) => {
@@ -62,7 +63,7 @@ const chatData = (p: Pair, userId: number, lang: Lang) => JSON.stringify({ me: u
 export async function sendCard(env: Env, p: Pair, userId: number, lang: Lang) {
   const api = botApi(env.BOT_TOKEN);
   const partner = (userId === p.a ? p.b_name : p.a_name) ?? "?";
-  const extra = { chat_data: chatData(p, userId, lang), reply_markup: { inline_keyboard: [[statsButton(env, t(lang, "pair_btn_stats", { name: partner }), p.id)]] } };
+  const extra = { chat_data: chatData(p, userId, lang), reply_markup: { inline_keyboard: [statsButton(env, t(lang, "pair_btn_stats", { name: partner }), p.id)].filter(row => row.length) } };
   const state = await cardState(env, p);
   const caption = t(lang, "w_pair_caption", { a: esc(state.an), b: esc(state.bn), compat: "m" in state ? state.m : 0 });
   if (p.widget_id && p.widget_rev === CARD_REV) return sendSharedWidget(api, userId, p.widget_id, { ...extra, caption, parse_mode: "HTML" });

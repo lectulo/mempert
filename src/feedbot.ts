@@ -3,6 +3,7 @@ import type { InlineKeyboardMarkup } from "grammy/types";
 import type { Ctx } from "./bot";
 import { albumSizes, type User } from "./db";
 import type { Env } from "./env";
+import { publicWebAppUrl } from "./telegramurl";
 import { FEED_MODES, feedMode, feedPage, markSeen, startSeed, type FeedMeme, type FeedMode } from "./feed";
 import { editMeme, sendMeme } from "./search/deliver";
 import { EMOJI, esc, t, type Key, type Lang } from "./i18n";
@@ -24,7 +25,7 @@ export function feedKeyboard(env: Env, lang: Lang, mode: FeedMode, seed: number,
     ...(m === mode ? { icon_custom_emoji_id: EMOJI.done[0] } : {}),
   });
   const app = { text: t(lang, "app_button"), web_app: { url: `${env.PUBLIC_URL.replace(/\/$/, "")}/?feed=${mode}` } };
-  return { inline_keyboard: [nav, FEED_MODES.slice(0, 4).map(button), FEED_MODES.slice(4).map(button), [app]].filter((row) => row.length) };
+  return { inline_keyboard: [nav, FEED_MODES.slice(0, 4).map(button), FEED_MODES.slice(4).map(button), ...(publicWebAppUrl(env) ? [[app]] : [])].filter((row) => row.length) };
 }
 
 export function feedCaption(lang: Lang, m: FeedMeme, offset: number, album?: number, comic = false) {
@@ -95,7 +96,7 @@ export async function showPairFeed(env: Env, api: Api, chatId: number, user: Pic
   await show(env, api, chatId, m, {
     caption: `${whose}\n${feedCaption(lang, m, offset, (await albumSizes(env.DB, [m.id])).get(m.id))}`,
     parse_mode: "HTML",
-    reply_markup: { inline_keyboard: [top, modes.slice(0, 4), modes.slice(4), [app]].filter((row) => row.length) },
+    reply_markup: { inline_keyboard: [top, modes.slice(0, 4), modes.slice(4), ...(publicWebAppUrl(env) ? [[app]] : [])].filter((row) => row.length) },
   }, messageId);
   await markSeen(env.DB, user.id, [m.id], f.users);
   return true;
