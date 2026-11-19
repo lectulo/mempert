@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import type { Meme } from "./db";
 import type { Env } from "./env";
+import { telegramFetch } from "./telegramproxy";
 
 export interface Media {
   bytes: ArrayBuffer;
@@ -55,10 +56,10 @@ export const variantOf = (m: MediaMeme, v: Variant): Variant => (v === "preview"
 const fallbackMime = (m: MediaMeme, v: Variant) => (v === "preview" ? "image/jpeg" : (m.mime ?? (m.kind === "photo" ? "image/jpeg" : "video/mp4")));
 
 async function downloadTelegram(env: Env, fileId: string, fallback: string): Promise<Media> {
-  const info = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/getFile?file_id=${encodeURIComponent(fileId)}`);
+  const info = await telegramFetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/getFile?file_id=${encodeURIComponent(fileId)}`, undefined, env.OUTBOUND_PROXY_URL);
   const { ok, result } = await info.json<{ ok: boolean; result?: { file_path?: string } }>();
   if (!ok || !result?.file_path) throw new Error(`getFile failed for ${fileId}`);
-  const res = await fetch(`https://api.telegram.org/file/bot${env.BOT_TOKEN}/${result.file_path}`);
+  const res = await telegramFetch(`https://api.telegram.org/file/bot${env.BOT_TOKEN}/${result.file_path}`, undefined, env.OUTBOUND_PROXY_URL);
   if (!res.ok) throw new Error(`Telegram download ${res.status} for ${fileId}`);
   return { bytes: await res.arrayBuffer(), mime: EXT_MIME[result.file_path.split(".").pop()!.toLowerCase()] ?? fallback };
 }

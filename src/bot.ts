@@ -1,5 +1,6 @@
 import { Bot, type Context } from "grammy";
 import { retryOn429 } from "./botapi";
+import { telegramClientOptions } from "./telegramproxy";
 import { registerAdmin } from "./admin";
 import { registerE621 } from "./e621bot";
 import { registerFeed } from "./feedbot";
@@ -24,7 +25,7 @@ import { answerWidget, type WidgetQuery } from "./widget";
 export type Ctx = Context & { user: User; lang: Lang };
 
 export function createBot(env: Env) {
-  const bot = new Bot<Ctx>(env.BOT_TOKEN);
+  const bot = new Bot<Ctx>(env.BOT_TOKEN, { client: telegramClientOptions(env.OUTBOUND_PROXY_URL) });
   bot.api.config.use(retryOn429());
   const html = { parse_mode: "HTML" } as const;
 

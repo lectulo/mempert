@@ -3,6 +3,7 @@ import { Buffer } from "node:buffer";
 import type { Env } from "./env";
 import { userLang } from "./db";
 import { t } from "./i18n";
+import { outboundFetch } from "./outboundproxy";
 
 const b64url = (b: ArrayBuffer | Uint8Array) => Buffer.from(b instanceof Uint8Array ? b : new Uint8Array(b)).toString("base64url");
 const random = (n: number) => b64url(crypto.getRandomValues(new Uint8Array(n)));
@@ -89,7 +90,7 @@ export async function oauthCallback(req: Request, env: Env) {
       ? Response.redirect(`${env.PUBLIC_URL.replace(/\/$/, "")}/?key=${ok ? "connected" : "failed"}`, 302)
       : backToBot(env, ok ? undefined : "key_failed");
 
-  const res = await fetch("https://openrouter.ai/api/v1/auth/keys", {
+  const res = await outboundFetch("https://openrouter.ai/api/v1/auth/keys", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ code, code_verifier: row.verifier, code_challenge_method: "S256" }),

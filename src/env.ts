@@ -27,6 +27,7 @@ export interface Env {
   R2_ACCESS_KEY_ID?: string; // secret: R2 API token with read access to R2_BUCKET
   R2_SECRET_ACCESS_KEY?: string; // secret
   BOT_TOKEN: string;
+  OUTBOUND_PROXY_URL?: string; // Telegram/OpenRouter HTTP(S)/SOCKS5 proxy; empty means direct
   WEBHOOK_SECRET: string;
   OPENROUTER_API_KEY: string;
   ENCRYPTION_KEY: string;

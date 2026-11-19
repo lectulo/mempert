@@ -1,6 +1,7 @@
 import { EMBED_DIMS, MODELS } from "./config";
 import type { Env } from "./env";
 import { esc } from "./i18n";
+import { outboundFetch } from "./outboundproxy";
 import { recordSpend, type Spend } from "./spend";
 import { apiKey, keyFor } from "./userkey";
 
@@ -59,7 +60,7 @@ const transient = (status: number) => status === 408 || status === 429 || status
 
 async function post(env: Env, path: string, body: { model: string } & Record<string, unknown>, spend: Spend, signal?: AbortSignal, retries = 1) {
   const { key, source } = await apiKey(env, spend.userId);
-  const res = await fetch(BASE + path, {
+  const res = await outboundFetch(BASE + path, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${key}`,
@@ -128,7 +129,7 @@ export interface Batch {
 }
 
 async function batchFetch(key: string, path: string, init: RequestInit = {}): Promise<Batch> {
-  const res = await fetch(`https://openrouter.ai/api/v1/batches${path}`, {
+  const res = await outboundFetch(`${BASE}/batches${path}`, {
     ...init,
     headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", "X-Title": "memesave-bot" },
   });

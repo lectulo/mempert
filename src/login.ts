@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { telegramFetch } from "./telegramproxy";
 import { resolveUser } from "./auth";
 import type { Env } from "./env";
 import { cookie, createSession, getCookie, SESSION_TTL } from "./session";
@@ -31,7 +32,7 @@ let jwks: { keys: (JsonWebKey & { kid?: string })[] } | undefined;
 let jwksAt = 0;
 
 /** Verifies the id_token signature with Telegram's JWKS and checks iss, aud and exp. */
-export async function verifyIdToken(token: string, audience: string, fetchJwks = () => fetch(`${ISSUER}/.well-known/jwks.json`)) {
+export async function verifyIdToken(token: string, audience: string, fetchJwks = () => telegramFetch(`${ISSUER}/.well-known/jwks.json`)) {
   const [h, p, s] = token.split(".");
   if (!h || !p || !s) return null;
   const header = JSON.parse(Buffer.from(h, "base64url").toString());
@@ -76,16 +77,16 @@ export async function handleLogin(req: Request, env: Env): Promise<Response | nu
     const code = url.searchParams.get("code");
     if (!state || !verifier || !code || state !== url.searchParams.get("state")) return fail("login_failed");
 
-    const res = await fetch(`${ISSUER}/token`, {
+    const res = await telegramFetch(`${ISSUER}/token`, {
       method: "POST",
       headers: {
         Authorization: `Basic ${btoa(`${botId(env)}:${env.TG_CLIENT_SECRET}`)}`,
         "Content-Type": "application/x-www-form-urlencoded",
       },
       body: new URLSearchParams({ grant_type: "authorization_code", code, redirect_uri: redirectUri(env), client_id: botId(env), code_verifier: verifier }),
-    });
+    }, env.OUTBOUND_PROXY_URL);
     const data = await res.json<{ id_token?: string }>().catch(() => ({}) as { id_token?: string });
-    const claims = res.ok && data.id_token ? await verifyIdToken(data.id_token, botId(env)) : null;
+    const claims = res.ok && data.id_token ? await verifyIdToken(data.id_token, botId(env), () => telegramFetch(`${ISSUER}/.well-known/jwks.json`, undefined, env.OUTBOUND_PROXY_URL)) : null;
     if (!claims?.id) return fail("login_failed");
 
     const lang = req.headers.get("Accept-Language")?.slice(0, 2);

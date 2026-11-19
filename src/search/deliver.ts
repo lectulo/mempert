@@ -4,6 +4,7 @@ import { sendPostAudio } from "../audio";
 import { albumMemes } from "../channels";
 import { blursPorn, type Meme } from "../db";
 import { botApi } from "../botapi";
+import { telegramClientOptions } from "../telegramproxy";
 import type { Env } from "../env";
 import { t, type Lang } from "../i18n";
 import { extractMedia } from "../ingest/receive";
@@ -195,7 +196,7 @@ export async function sendAlbumJob(env: Env, userId: number, memeId: string, fro
   const memes = sendOrder(await albumMemes(env.DB, memeId));
   const next = (from: number, delaySeconds: number) => env.JOBS.send({ type: "send_album", userId, memeId, from }, { delaySeconds });
   try {
-    await sendAlbum(env, new Api(env.BOT_TOKEN), userId, memes.slice(from, from + 10));
+    await sendAlbum(env, new Api(env.BOT_TOKEN, telegramClientOptions()), userId, memes.slice(from, from + 10));
   } catch (e) {
     if (e instanceof GrammyError && e.parameters.retry_after) return next(from, e.parameters.retry_after + 1);
     throw e;

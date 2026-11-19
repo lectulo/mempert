@@ -1,4 +1,5 @@
 import { Api, GrammyError } from "grammy";
+import { telegramClientOptions } from "../telegramproxy";
 import { lostChannel, storageChat } from "../channels";
 import { UPLOAD_GAP_MS } from "../config";
 import { getMeme, type Meme } from "../db";
@@ -58,7 +59,7 @@ export async function uploadJob(env: Env, api: Api, { userId, memeIds }: UploadJ
 
 /** Consumer of the upload queue. No auto-retry on 429: the whole job waits for retry_after instead. */
 export async function handleUploads(batch: MessageBatch<UploadJob>, env: Env) {
-  const api = new Api(env.BOT_TOKEN);
+  const api = new Api(env.BOT_TOKEN, telegramClientOptions());
   for (const msg of batch.messages) {
     try {
       await uploadJob(env, api, msg.body);

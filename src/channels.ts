@@ -1,6 +1,7 @@
 import { Api, GrammyError, type Composer } from "grammy";
 import type { ChatMemberUpdated, InlineKeyboardButton } from "grammy/types";
 import { botApi } from "./botapi";
+import { telegramClientOptions } from "./telegramproxy";
 import type { Ctx } from "./bot";
 import { userLang, type Meme } from "./db";
 import type { Env } from "./env";
@@ -192,7 +193,7 @@ export async function postComicJob(env: Env, postId: string, chatId: number, fro
   const pages = await postMemes(env.DB, postId);
   const next = (from: number, delaySeconds: number) => env.JOBS.send({ type: "post_comic", postId, chatId, from }, { delaySeconds });
   try {
-    await sendAlbum(env, new Api(env.BOT_TOKEN), chatId, pages.slice(from, from + 10));
+    await sendAlbum(env, new Api(env.BOT_TOKEN, telegramClientOptions()), chatId, pages.slice(from, from + 10));
   } catch (e) {
     if (e instanceof GrammyError && e.parameters.retry_after) return next(from, e.parameters.retry_after + 1);
     return channelFailed(env, ch, e);
