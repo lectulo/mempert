@@ -43,7 +43,7 @@
         <Heading level={2} size="lg">{s.landingPricing}</Heading>
         <Text>{fill(s.landingPlan, { month: price(PLANS.monthly.usd), year: price(PLANS.yearly.usd) })}</Text>
         <Text tone="muted">{fill(s.billIncludedHint, { allowance: price(MONTHLY_ALLOWANCE) })}</Text>
-        <Text tone="muted">{fill(s.landingByok, { month: price(PLANS.monthly.byokUsd), year: price(PLANS.yearly.byokUsd) })}</Text>
+        <!-- BYOK disabled: <Text tone="muted">{fill(s.landingByok, { month: price(PLANS.monthly.byokUsd), year: price(PLANS.yearly.byokUsd) })}</Text> -->
         <Text tone="muted">{s.landingPay}</Text>
       </Stack>
     </Card>

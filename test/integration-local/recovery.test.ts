@@ -1,11 +1,17 @@
 import { afterEach, beforeEach, expect, mock, spyOn, test } from "bun:test";
 mock.module("cloudflare:workers", () => ({ WorkerEntrypoint: class WorkerEntrypoint {} }));
-import { fixture, vector } from "./fixture";
+import { fixture, providerKey, vector } from "./fixture";
 import type { Env } from "../../src/env";
 import type { Ctx } from "../../src/bot";
+import type { Job } from "../../src/queue";
 import { Api } from "grammy";
+import { saveAIConfig } from "../../src/aimodels";
+import { resolveUser } from "../../src/auth";
+import { DESCRIBE_MODELS } from "../../src/config";
+import { setUserKey } from "../../src/userkey";
 const { BATCH_DISABLED_ERROR, cancelImport, finishImport, pollImports, recoverBatchImports, retryFailed, startImport, submitImport } = await import("../../src/batch");
 const { describeStage } = await import("../../src/ingest/describe");
+const { handleBatch } = await import("../../src/queue");
 const { embedStage } = await import("../../src/ingest/embed");
 const { receiveMedia } = await import("../../src/ingest/receive");
 const { hybridSearch } = await import("../../src/search/hybrid");
@@ -25,7 +31,7 @@ beforeEach(async () => {
     notices.push(text); return { message_id: 1 } as never;
   });
   process.env.SELF_HOSTED = "true";
-  Object.assign(f.env, { OPENROUTER_API_KEY: "test-key" });
+  await providerKey(f.env, "openrouter", "test-key");
   network = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0]) => {
     unexpected.push(String(input)); throw new Error(`Unexpected external call: ${input}`);
   }, {preconnect:fetch.preconnect}));
@@ -105,6 +111,75 @@ test("startup fails ambiguous external submit visibly without resubmitting AI", 
   expect(f.jobs).toEqual([]);
 });
 
+// Upstream d039880 defaults for the OpenRouter batch endpoint, independent of online routes.
+test.each([
+  ["medium", "openai/gpt-6-luna"],
+  ["max", "google/gemini-4-argon"],
+] as const)("new %s batches use the fixed OpenRouter model despite online routing and BYOK", async (tier, model) => {
+  const account = await resolveUser(f.env, { id: 101, is_bot: false, first_name: "Fixture" });
+  expect(account?.user.describe_tier).toBe("medium");
+  await f.meme("photo", 101);
+  if (tier === "max") await f.env.DB.prepare("UPDATE users SET describe_tier='max' WHERE id=101").run();
+  expect(await saveAIConfig(f.env, {
+    action: "route", workload: `photo_${tier}`, providerId: "openrouter", model: "google/gemini-3.8-flash",
+  })).toBeNull();
+  await setUserKey(f.env, 101, "ignored-legacy-key");
+  await f.env.DB.prepare("INSERT INTO imports(id,user_id,status) VALUES ('imp',101,'submitting')").run();
+  await f.env.DB.prepare("UPDATE memes SET title=NULL,status='describing',import_id='imp' WHERE id='photo'").run();
+  const edit = spyOn(Api.prototype, "editMessageText").mockResolvedValue(true as never);
+  let calls = 0;
+  network.mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    calls++;
+    expect(String(input)).toBe("https://openrouter.ai/api/v1/batches");
+    expect(new Request(String(input), init).headers.get("Authorization")).toBe("Bearer test-key");
+    expect(init?.redirect).toBe("error");
+    const body = JSON.parse(String(init?.body));
+    expect(body.model).toBe(model);
+    expect(body.requests[0].body.model).toBe(body.model);
+    expect(body.requests[0].body.tools).toBeUndefined();
+    return Response.json({ id: "batch-id", status: "in_progress" });
+  }, { preconnect: fetch.preconnect }));
+  try {
+    await submitImport(Object.assign(f.env, { BATCH_ENABLED: "true" }), "imp");
+    expect(calls).toBe(1);
+    expect(await f.env.DB.prepare("SELECT status,key_source,model FROM imports WHERE id='imp'").first<Record<string, string>>())
+      .toEqual({ status: "submitted", key_source: "global", model });
+  } finally {
+    edit.mockRestore();
+  }
+});
+
+test("a blocked batch photo skips the rejected default model when its durable job runs", async () => {
+  await submitted();
+  f.env.BATCH_ENABLED = "true";
+  await f.env.DB.prepare("UPDATE users SET describe_tier='max' WHERE id=101").run();
+  await f.env.DB.prepare("UPDATE imports SET model=? WHERE id='imp'").bind(DESCRIBE_MODELS.max).run();
+  const models: string[] = [];
+  network.mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const url = String(input);
+    if (url === "https://openrouter.ai/api/v1/batches/remote-1") return Response.json({ id: "remote-1", status: "completed", results: [
+      { custom_id: "photo", error: { message: "Gemini blocked the request: SAFETY" } },
+    ] });
+    if (url === "https://openrouter.ai/api/v1/chat/completions") {
+      models.push(JSON.parse(String(init?.body)).model);
+      return Response.json({ choices: [{ message: { content: '{"title":"Recovered photo"}' } }], usage: { cost: 0 } });
+    }
+    if (url === "https://openrouter.ai/api/v1/embeddings") return Response.json({ data: [{ index: 0, embedding: vector() }], usage: { cost: 0 } });
+    unexpected.push(url); throw new Error(`Unexpected external call: ${url}`);
+  }, { preconnect: fetch.preconnect }));
+  await pollImports(f.env);
+  const body = { type: "describe", memeId: "photo", gen: 0, from: 1, batchModel: DESCRIBE_MODELS.max } satisfies Job;
+  expect(f.jobs).toEqual([body]);
+  const ack = mock();
+  const retry = mock();
+  await handleBatch({ messages: [{ body, ack, retry, attempts: 1 }] } as unknown as MessageBatch<Job>, f.env);
+  expect(ack).toHaveBeenCalledTimes(1);
+  expect(retry).not.toHaveBeenCalled();
+  expect(models).toEqual([DESCRIBE_MODELS.medium]);
+  expect(await f.env.DB.prepare("SELECT status, title, import_id FROM memes WHERE id='photo'")
+    .first<{ status: string; title: string; import_id: string | null }>()).toEqual({ status: "ready", title: "Recovered photo", import_id: null });
+});
+
 test("disabled batches stop unsubmitted work on startup and reject stale queue jobs", async () => {
   Object.assign(f.env, { BATCH_ENABLED: "false" });
   for (const id of ["collecting", "submitting", "stale", "described", "normal", "blocked"]) await f.meme(id, 101);
@@ -170,7 +245,7 @@ test("disabled startup recovers a known batch and bills successes once without r
     if (polls === 1) return Response.json({ id: "remote-1", status: "in_progress" });
     return Response.json({ id: "remote-1", status: "completed", usage: { cost: 0.125 }, results: [
       { custom_id: "photo", response: { body: { choices: [{ message: { content: '{"title":"Recovered otter"}' } }] } } },
-      { custom_id: "failed", error: { message: "bad" } },
+      { custom_id: "failed", error: { message: "private-provider-error", metadata: { raw: "private-provider-raw" } } },
       { custom_id: "blocked", error: { message: "Gemini blocked the request: SAFETY" } },
     ] });
   }, { preconnect: fetch.preconnect }));
@@ -185,6 +260,8 @@ test("disabled startup recovers a known batch and bills successes once without r
   expect(f.jobs).toEqual([{ type: "batch_poll" }, { type: "finish", memeId: "photo", gen: 0 }]);
   expect(await f.env.DB.prepare("SELECT status,described,attempts,cost FROM imports WHERE id='imp'").first<Record<string, string | number>>())
     .toEqual({ status: "failed", described: 1, attempts: 1, cost: 0.125 });
+  expect(await f.env.DB.prepare("SELECT error FROM imports WHERE id='imp'").first<string>("error"))
+    .toBe("Batch provider reported an error");
   expect(await f.env.DB.prepare("SELECT count(*) AS n FROM transactions").first<number>("n")).toBe(1);
   expect(await f.env.DB.prepare("SELECT count(*) AS n FROM memes WHERE status='failed'").first<number>("n")).toBe(2);
 });

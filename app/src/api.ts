@@ -461,6 +461,20 @@ export interface UsersList {
   grants: { username: string; role: string }[];
 }
 
+export const AI_WORKLOADS = ["photo_medium", "photo_max", "video", "search_rewrite", "search_agent", "analysis_labels", "pair_facts", "analysis_moods", "pair_moods"] as const;
+export type AIWorkload = typeof AI_WORKLOADS[number];
+export type AIRoute = { providerId: string; model: string };
+export type AIProvider = { id: string; name: string; baseUrl: string; hasKey: boolean; keyPreview: string | null };
+export type AIModel = AIRoute & { prompt: number; completion: number; cacheWrite: number; cacheRead: number; deleteProtected?: boolean };
+export type AISettings = { providers: AIProvider[]; models: AIModel[]; routes: Partial<Record<AIWorkload, AIRoute>> };
+export type AISettingUpdate =
+  | { action: "provider"; id: string; name: string; key?: string }
+  | ({ action: "provider_create"; key?: string } & Pick<AIProvider, "id" | "name" | "baseUrl">)
+  | { action: "deleteProvider"; id: string }
+  | ({ action: "model" } & Omit<AIModel, "deleteProtected">)
+  | ({ action: "deleteModel" } & AIRoute)
+  | ({ action: "route"; workload: AIWorkload } & AIRoute);
+
 const post = <T>(path: string, body?: object) => call<T>(path, { method: "POST", body: body ? JSON.stringify(body) : undefined });
 
 export interface UploadMeta {
@@ -540,6 +554,8 @@ export const api = {
   accountSummary: () => call<{ memes: number; payments: number }>("account"),
   deleteAccount: (confirm: string) => post<{ ok: true }>("account/delete", { confirm }),
   users: () => call<UsersList>("admin/users"),
+  adminAI: () => call<AISettings>("admin/ai"),
+  saveAdminAI: (update: AISettingUpdate) => post<{ ok: true }>("admin/ai", update),
   grant: (target: string, role: string) => post<{ result: string; target: string }>("admin/grant", { target, role }),
   revoke: (target: string) => post<{ result: string; target: string }>("admin/revoke", { target }),
   retry: (id: string) => post(`memes/${id}/retry`),

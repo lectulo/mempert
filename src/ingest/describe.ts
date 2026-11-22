@@ -1,4 +1,5 @@
 import { botApi } from "../botapi";
+import type { AIPrices } from "../aimodels";
 import { DEFAULT_TIER, DESCRIBE_FALLBACKS, DESCRIBE_MODELS, DESCRIBE_UNCENSORED, DESCRIBE_VIDEO_FALLBACKS, MODELS, VIDEO_INLINE_MAX_BYTES } from "../config";
 import { getMeme, getUser, setStatus, userLang, type Meme } from "../db";
 import { ALBUM_WAIT, albumMemes, albumPhotos, queuePosts } from "../channels";
@@ -8,11 +9,10 @@ import type { Env } from "../env";
 import { push } from "../live";
 import { esc, t, type Lang } from "../i18n";
 import { memeMedia, toDataUrl, variantOf } from "../media";
-import { chat, embed, errorNote, type Part } from "../openrouter";
+import { embed, errorNote, OpenRouterError, requireAIRoute, routedChat, type Part } from "../openrouter";
 import { sha256hex } from "../cache";
 import { namespace, upsertEmbedded } from "./embed";
 import { showSaveStatus } from "../savewidget";
-import { photoProvider, providerDescription } from "../photoprovider";
 
 export interface Description {
   title: string;
@@ -153,7 +153,7 @@ export async function topTags(db: D1Database, userId: number, n = 30): Promise<s
   return [...count.entries()].sort((a, b) => b[1] - a[1]).slice(0, n).map(([tag]) => tag);
 }
 
-/** The picture or video of the meme; `frame`: the preview frame of a video (for models without video input). */
+/** The photo, video, or preview frame if the video is too large or the model is image-only. */
 async function mediaPart(env: Env, m: Meme, frame = false): Promise<Part[]> {
   if (m.kind === "photo") {
     return [{ type: "image_url", image_url: { url: toDataUrl(await memeMedia(env, m, "file")) } }];
@@ -170,23 +170,18 @@ async function mediaPart(env: Env, m: Meme, frame = false): Promise<Part[]> {
   ];
 }
 
-/** Chat request that describes one meme. Without tools; the sync pipeline adds web tools. */
 export type Tier = keyof typeof DESCRIBE_MODELS;
 
 /** The owner's describe quality tier. */
 export const userTier = async (db: D1Database, userId: number): Promise<Tier> => (await getUser(db, userId))?.describe_tier ?? DEFAULT_TIER;
 
-/**
- * Models to try in order: the tier's model, then other ones when a provider blocks or refuses the meme; the uncensored one is last.
- * It has no video input: a video gets it only when it has a preview frame.
- */
-export const describeModels = (m: Pick<Meme, "kind" | "r2_preview" | "preview_file_id">, tier: Tier) =>
-  m.kind === "photo"
-    ? [...new Set([DESCRIBE_MODELS[tier], ...DESCRIBE_FALLBACKS, DESCRIBE_UNCENSORED])]
-    : [MODELS.describeVideo, ...DESCRIBE_VIDEO_FALLBACKS, ...(m.r2_preview || m.preview_file_id ? [DESCRIBE_UNCENSORED] : [])];
-
 /** A provider's safety filter blocked the request (an error, an empty answer) or the model refused it. */
 export const isBlocked = (e: unknown) => /SAFETY|content.?(policy|filter)|PROHIBITED|blocked|moderation|empty answer|refused/i.test(String(e));
+
+/** Only transient completion failures qualify, not bad requests or failures reading/saving media. */
+const isTransient = (e: unknown) => e instanceof OpenRouterError
+  ? /^OpenRouter (408|429|5\d\d):/.test(e.reason)
+  : e instanceof Error && (e.name === "TimeoutError" || /fetch failed|^Outbound transport failed$/i.test(e.message));
 
 const REFUSAL = /\bI(?:['’]m| am)? (?:can['’]?t|cannot|won['’]?t|unable to|not able to) [^.]{0,40}?\b(?:describe|assist|comply|provide|help (?:you|with))|against my (?:guidelines|policy|policies)/i;
 /** A short text that declines the request, like "I can't describe this image". */
@@ -195,16 +190,19 @@ export const isRefusal = (s: string) => s.length < 400 && REFUSAL.test(s);
 /** Descriptions of a model answer (`n` for an album); throws "refused" (see isBlocked) when the model declined. */
 export function parseAnswer(content: string, refusal: string | null | undefined, n = 1): Description[] {
   const text = content.trim();
-  if (refusal || (!text.includes("{") && isRefusal(text))) throw new Error(`refused: ${refusal || text.slice(0, 200)}`);
-  const raw = parseJson(text);
-  const ds = n > 1 ? toDescriptions(raw, text, n) : [toDescription(raw, text)];
-  if (ds.some((d) => isRefusal(d.title) || isRefusal(d.description))) throw new Error(`refused: ${text.slice(0, 200)}`);
+  if (refusal || (!text.includes("{") && isRefusal(text))) throw new Error("Model refused the description request");
+  let ds: Description[];
+  try {
+    const raw = parseJson(text);
+    ds = n > 1 ? toDescriptions(raw, text, n) : [toDescription(raw, text)];
+  } catch {
+    throw new Error("Bad description JSON from model");
+  }
+  if (ds.some((d) => isRefusal(d.title) || isRefusal(d.description))) throw new Error("Model refused the description request");
   return ds;
 }
-/** OpenRouter or the provider failed after the retry: another model may work. */
-export const isTransient = (e: unknown) => /OpenRouter \S+ (408|429|5\d\d) |fetch failed/i.test(String(e));
-
-export function describeRequest(m: Meme, usedTags: string[], media: Part[], tier: Tier = DEFAULT_TIER) {
+/** Chat request that describes one meme, without a model or provider-specific tools. */
+export function describeRequest(m: Meme, usedTags: string[], media: Part[]) {
   const meta = parseMeta(m);
   const context = [
     `Meme kind: ${m.kind}. User caption: ${JSON.stringify(m.caption ?? "")}. Forwarded from: ${JSON.stringify(m.source ?? "")}.`,
@@ -214,7 +212,6 @@ export function describeRequest(m: Meme, usedTags: string[], media: Part[], tier
     .filter(Boolean)
     .join("\n");
   return {
-    model: m.kind === "photo" ? DESCRIBE_MODELS[tier] : MODELS.describeVideo,
     temperature: 0.2,
     messages: [
       { role: "system" as const, content: PROMPT },
@@ -274,9 +271,9 @@ const fromRow = (m: Meme): Description => ({
 
 /**
  * Stage 2: describes the meme with web tools, then finishes it. A retry skips the paid call when the description is saved.
- * When a provider blocks the meme or fails, the next model in describeModels tries it; `from` skips models that already refused.
+ * `from: 1` marks a blocked batch fallback, including older jobs without a recorded model.
  */
-export async function describeStage(env: Env, memeId: string, from = 0, single = false, gen = 0) {
+export async function describeStage(env: Env, memeId: string, from = 0, single = false, gen = 0, batchModel?: string) {
   const m = await getMeme(env.DB, memeId);
   if (!m || m.gen !== gen || m.status !== "describing") return;
   if (await stopBatchDescription(env, m, from)) return;
@@ -285,7 +282,7 @@ export async function describeStage(env: Env, memeId: string, from = 0, single =
   if (m.title === null && DESCRIPTION.every((k) => k in edits)) await saveDescription(env.DB, m, fromRow({ ...m, ...edits })).run();
   else if (m.title === null) {
     // Photos of a media group are described in one request: wait until the album is complete and embedded.
-    const photos = m.kind === "photo" && !single ? await albumPhotos(env.DB, memeId) : [];
+    const photos = m.kind === "photo" && !single && from !== 1 ? await albumPhotos(env.DB, memeId) : [];
     const album = batchEnabled(env) ? photos : photos.filter((a) => !a.import_id);
     const comic = album[0]?.album_layout === "comic";
     const wait = comic ? COMIC_WAIT : ALBUM_WAIT;
@@ -299,7 +296,7 @@ export async function describeStage(env: Env, memeId: string, from = 0, single =
     const group = pending.length > 1 ? pending : [m];
     const pages = comic ? ` They are pages ${album.indexOf(pending[0]) + 1}-${album.indexOf(pending.at(-1)!) + 1} of a comic of ${album.length} pages${album[0].caption ? ` (${JSON.stringify(album[0].caption)})` : ""}.` : "";
     try {
-      await describeGroup(env, m, group, from, pages);
+      await describeGroup(env, m, group, pages, from === 1, batchModel);
     } catch (e) {
       if (group.length === 1) throw e;
       // The album request failed: each photo is described alone.
@@ -312,40 +309,51 @@ export async function describeStage(env: Env, memeId: string, from = 0, single =
 }
 
 /** Describes the memes in one request (the first one is `m`) and saves the descriptions; the others get finish jobs. */
-async function describeGroup(env: Env, m: Meme, group: Meme[], from: number, note = "") {
+async function describeGroup(env: Env, m: Meme, group: Meme[], note: string, blockedBatch: boolean, batchModel?: string) {
   const memeId = m.id;
-  const user = await getUser(env.DB, m.user_id);
-  const tier = user?.describe_tier ?? DEFAULT_TIER;
-  const provider = m.kind === "photo" && !user?.openrouter_key ? photoProvider(env) : null;
+  const tier = await userTier(env.DB, m.user_id);
+  const workload = m.kind === "photo" ? `photo_${tier}` as const : "video";
+  const route = await requireAIRoute(env, workload);
+  const photo = m.kind === "photo";
+  const legacy = route.providerId === "openrouter" && route.model === (photo ? DESCRIBE_MODELS[tier] : MODELS.describeVideo);
+  // Old blocked-batch jobs only carry `from: 1`; preserve their skip-first behavior.
+  const rejected = blockedBatch ? batchModel ?? route.model : undefined;
+  const models = !legacy ? [route.model] : photo
+    ? [...new Set([route.model, ...DESCRIBE_FALLBACKS, DESCRIBE_UNCENSORED])].filter((model) => model !== rejected)
+    : [route.model, ...DESCRIBE_VIDEO_FALLBACKS, ...(variantOf(m, "preview") === "preview" ? [DESCRIBE_UNCENSORED] : [])];
   const tags = await topTags(env.DB, m.user_id);
-  const build = async (frame: boolean) => {
+  const build = async (frame = false) => {
     const media = group.length > 1
       ? (await Promise.all(group.map(async (g, i) => [{ type: "text" as const, text: `Image ${i + 1}. User caption: ${JSON.stringify(g.caption ?? "")}.` }, ...(await mediaPart(env, g))]))).flat()
       : await mediaPart(env, m, frame);
     const albumText = `This is an album of ${group.length} images sent together; use them as context for each other. Reply {"items": [...]} with one object per image, in order.${note}`;
     return {
-      ...describeRequest(m, tags, group.length > 1 ? [{ type: "text", text: albumText }, ...media] : media, tier),
+      ...describeRequest(m, tags, group.length > 1 ? [{ type: "text", text: albumText }, ...media] : media),
       tools: WEB_TOOLS,
       ...(group.length > 1 && { response_format: { type: "json_schema", json_schema: { name: "album", strict: true, schema: ALBUM_SCHEMA } } }),
     };
   };
-  let body = await build(false);
-  const models = provider ? [provider.model] : describeModels(m, tier);
-  for (let i = Math.min(from, models.length - 1); ; i++) {
+  const body = await build();
+  for (const [i, model] of models.entries()) {
+    // Keep the resolved credentials; price a fallback with its own rates, not the primary's.
+    const prices = model === route.model ? route : await env.DB.prepare(`SELECT prompt, completion,
+      cache_write AS cacheWrite, cache_read AS cacheRead FROM ai_models WHERE provider_id=? AND model=?`)
+      .bind(route.providerId, model).first<AIPrices>();
+    if (!prices) throw new Error("Description fallback model unavailable");
+    const request = legacy && !photo && model === DESCRIBE_UNCENSORED ? await build(true) : body;
+    let ds: Description[];
     try {
-      // The uncensored model has no video input: a video goes to it as its preview frame.
-      if (m.kind !== "photo" && models[i] === DESCRIBE_UNCENSORED) body = await build(true);
-      const spend = { userId: m.user_id, memeId, kind: "describe" };
-      const msg = provider ? await providerDescription(env, provider, body, spend) : await chat(env, { ...body, model: models[i] }, spend);
-      if (!msg.content?.trim()) throw new Error(`${models[i]}: empty answer`);
-      const ds = parseAnswer(msg.content, msg.refusal, group.length);
-      await env.DB.batch(group.map((g, j) => saveDescription(env.DB, g, ds[j])));
-      await Promise.all(group.slice(1).map((g) => env.JOBS.send({ type: "finish", memeId: g.id, gen: g.gen })));
-      break;
+      const msg = await routedChat(env, { ...route, ...prices, model }, request, { userId: m.user_id, memeId, kind: "describe" });
+      if (!msg.content?.trim() && !msg.refusal) throw new Error(`${workload}: empty answer`);
+      ds = parseAnswer(msg.content ?? "", msg.refusal, group.length);
     } catch (e) {
       if (i + 1 >= models.length || !(isBlocked(e) || isTransient(e))) throw e;
-      console.warn("describe failed, next model", memeId, models[i], String(e).slice(0, 200));
+      console.warn("describe failed, next model", memeId, model);
+      continue;
     }
+    await env.DB.batch(group.map((g, j) => saveDescription(env.DB, g, ds[j])));
+    await Promise.all(group.slice(1).map((g) => env.JOBS.send({ type: "finish", memeId: g.id, gen: g.gen })));
+    return;
   }
 }
 

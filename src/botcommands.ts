@@ -7,7 +7,7 @@ import { publicWebAppUrl } from "./telegramurl";
 import { t, type Key, type Lang } from "./i18n";
 
 export const BATCH_COMMANDS = ["batch", "batch_finish", "batch_cancel", "batch_status", "batch_retry"];
-const userCommands = (batch: boolean) => ["start", "help", "feed", "pair", "stats", "settings", "key", "batch_zip", ...(batch ? BATCH_COMMANDS : []), "export", "delete", "delete_all", "channels", "e621", "mcp", "subscribe", "balance", "paysupport", "terms", "about"];
+const userCommands = (batch: boolean) => ["start", "help", "feed", "pair", "stats", "settings", /* "key", */ "batch_zip", ...(batch ? BATCH_COMMANDS : []), "export", "delete", "delete_all", "channels", "e621", "mcp", "subscribe", "balance", "paysupport", "terms", "about"];
 const adminCommands = (batch: boolean) => [...userCommands(batch), "grant", "revoke", "users"];
 
 const list = (names: string[], lang: Lang) =>

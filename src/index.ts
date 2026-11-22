@@ -11,7 +11,7 @@ import { queueHashBackfill } from "./ingest/embed";
 import { queueE621 } from "./e621";
 import { queueRekey } from "./rekey";
 import { handleBatch, type Job } from "./queue";
-import { backToBot, oauthCallback } from "./userkey";
+import { backToBot /*, oauthCallback */ } from "./userkey";
 import { serveMedia } from "./media";
 import { handleLogin } from "./login";
 import { handleAuthorize, oauthOptions } from "./oauth";
@@ -34,7 +34,8 @@ const app = {
     const url = new URL(req.url);
     if (req.method === "GET" && url.pathname === "/bot") return backToBot(env);
     if (req.method === "GET" && url.pathname === "/openapi.json") return serveOpenapi(env);
-    if (req.method === "GET" && url.pathname === "/oauth/callback") return oauthCallback(req, env);
+    // BYOK disabled. MCP OAuth still uses /oauth/authorize, /oauth/token, and /oauth/register.
+    // if (req.method === "GET" && url.pathname === "/oauth/callback") return oauthCallback(req, env);
     if (url.pathname === "/oauth/authorize") return handleAuthorize(req, env);
     if (req.method === "GET" && url.pathname.startsWith("/media/")) return serveMedia(req, env, ctx);
     if (req.method === "GET" && /^\/[sd]\//.test(url.pathname)) return handleShare(req, env, ctx);

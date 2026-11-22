@@ -31,12 +31,7 @@ export interface Env {
   TELEGRAM_MODE?: "polling" | "webhook"; // local runtime defaults to polling
   OUTBOUND_PROXY_URL?: string; // Telegram/OpenRouter HTTP(S)/SOCKS5 proxy; empty means direct
   WEBHOOK_SECRET: string;
-  OPENROUTER_API_KEY: string;
   BATCH_ENABLED?: string;
-  PHOTO_API_BASE_URL?: string;
-  PHOTO_API_KEY?: string;
-  PHOTO_MODEL?: string;
-  PHOTO_REASONING_EFFORT?: string;
   ENCRYPTION_KEY: string;
   TG_CLIENT_SECRET: string; // BotFather → Login Widget → Client Secret
   BTCPAY_URL?: string; // BTCPay Server (BTC, XMR, USDT); payments are off without it

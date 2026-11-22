@@ -2,7 +2,7 @@
 // (both of a pair), embedded as search queries; the container scores each meme's text vector against them.
 import type { Analysis } from "./analysis";
 import { canUseAi } from "./billing";
-import { DEFAULT_MOODS, MODELS } from "./config";
+import { DEFAULT_MOODS } from "./config";
 import { tagStats } from "./analytics";
 import { getUser } from "./db";
 import type { Env } from "./env";
@@ -50,15 +50,15 @@ async function profile(db: D1Database, users: number[]) {
 }
 
 /** 10–14 moods with 3–6 phrases per target language from one LLM call; null when it fails. */
-async function llmMoods(env: Env, payer: number, users: number[], kind: string): Promise<Mood[] | null> {
+async function llmMoods(env: Env, payer: number, users: number[], kind: "analysis_moods" | "pair_moods"): Promise<Mood[] | null> {
   const { sides, targets } = await profile(env.DB, users);
   const input = sides
     .map((s, i) => `Person ${"AB"[i]}\ntop tags: ${s.tags.join(", ")}\nmeme languages: ${s.langs.map((l) => `${l.k} ${Math.round(100 * l.share)}%`).join(", ") || "-"}\napp language: ${s.ui}`)
     .join("\n\n");
   const msg = await chat(
     env,
+    kind,
     {
-      model: MODELS.search,
       max_tokens: 4000,
       reasoning: { enabled: false },
       messages: [

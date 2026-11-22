@@ -7,7 +7,7 @@ import { parseJson, saveDescription, toDescription, type Description, type Sourc
 import { BATCH_DISABLED_ERROR, collectingImport } from "./batch";
 import { batchEnabled } from "./batchmode";
 import { MODELS } from "./config";
-import { photoModel } from "./photoprovider";
+import { listAIRoutes } from "./aimodels";
 import { handleAccount } from "./webaccount";
 import { albumZip } from "./albumzip";
 import { addToPost, albumMemes } from "./channels";
@@ -460,8 +460,11 @@ async function handleApi(req: Request, env: Env, url: URL): Promise<Response> {
       username: user.username,
       role: user.role,
       search_mode: user.search_mode,
-      key: user.openrouter_key !== null,
-      models: { ...MODELS, describeImage: photoModel(env, user) },
+      key: false, // BYOK disabled: user.openrouter_key !== null.
+      models: {
+        embed: MODELS.embed,
+        ...Object.fromEntries(Object.entries(await listAIRoutes(env)).map(([workload, route]) => [workload, `${route.providerId} / ${route.model}`])),
+      },
       describe_tier: user.describe_tier,
       hide_porn: !!user.hide_porn,
       blur_porn: !!user.blur_porn,
@@ -481,7 +484,8 @@ async function handleApi(req: Request, env: Env, url: URL): Promise<Response> {
     if (!gate.ok) return json({ error: "payment required", reason: gate.reason }, 402);
   }
   // API tokens cannot change the account (tokens, keys, billing, deletion).
-  const account = token && m !== "GET" ? null : await handleAccount(req, env, user, [resource, id, action]);
+  const account = token && m !== "GET" && !(resource === "admin" && id === "ai")
+    ? null : await handleAccount(req, env, user, [resource, id, action], !token);
   if (account) return account;
   if (resource === "pairs") return token ? json({ error: "no access" }, 403) : pairsApi(req, env, user, auth.name ?? user.username, via, id, action);
   if (resource === "upload" && req.method === "POST") return upload(env, user, req, via);

@@ -4,6 +4,7 @@ import type { Env } from "./env";
 import { userLang } from "./db";
 import { t } from "./i18n";
 import { outboundFetch } from "./outboundproxy";
+import { getAIProvider } from "./aimodels";
 
 const b64url = (b: ArrayBuffer | Uint8Array) => Buffer.from(b instanceof Uint8Array ? b : new Uint8Array(b)).toString("base64url");
 const random = (n: number) => b64url(crypto.getRandomValues(new Uint8Array(n)));
@@ -26,27 +27,27 @@ export async function decrypt(secret: string, sealed: string) {
   return new TextDecoder().decode(await crypto.subtle.decrypt({ name: "AES-GCM", iv }, await aesKey(secret), data));
 }
 
-const cache = new Map<number, { key: string | null; at: number }>();
-
-/** The user's own OpenRouter key if connected, else the bot's global key. Cached for 60 s per isolate. */
-export async function apiKey(env: Env, userId: number): Promise<{ key: string; source: "global" | "user" }> {
-  let hit = cache.get(userId);
-  if (!hit || Date.now() - hit.at > 60_000) {
-    const sealed = await env.DB.prepare("SELECT openrouter_key FROM users WHERE id = ?").bind(userId).first<string | null>("openrouter_key");
-    hit = { key: sealed ? await decrypt(env.ENCRYPTION_KEY, sealed) : null, at: Date.now() };
-    cache.set(userId, hit);
-  }
-  return hit.key ? { key: hit.key, source: "user" } : { key: env.OPENROUTER_API_KEY, source: "global" };
+/** Stored user credentials are only consulted for batches accepted before BYOK was disabled. */
+async function legacyUserKey(env: Env, userId: number) {
+  const sealed = await env.DB.prepare("SELECT openrouter_key FROM users WHERE id = ?").bind(userId).first<string>("openrouter_key");
+  return sealed ? await decrypt(env.ENCRYPTION_KEY, sealed) : null;
 }
 
-/** Key for a given source; "user" falls back to the global key when the user removed theirs. */
+const globalKey = async (env: Env) => (await getAIProvider(env, "openrouter"))?.key ?? "";
+
+/** New requests always use the administrator's credential. */
+export async function apiKey(env: Env, _userId: number): Promise<{ key: string; source: "global" }> {
+  // const key = await legacyUserKey(env, _userId); // BYOK disabled for new work.
+  return { key: await globalKey(env), source: "global" };
+}
+
+/** Keep legacy user-owned batches on their original key source, even when the key is missing. */
 export const keyFor = async (env: Env, userId: number, source: "global" | "user") =>
-  source === "global" ? env.OPENROUTER_API_KEY : (await apiKey(env, userId)).key;
+  source === "user" ? legacyUserKey(env, userId) : globalKey(env);
 
 export async function setUserKey(env: Env, userId: number, key: string | null) {
   const sealed = key ? await encrypt(env.ENCRYPTION_KEY, key) : null;
   await env.DB.prepare("UPDATE users SET openrouter_key = ? WHERE id = ?").bind(sealed, userId).run();
-  cache.delete(userId);
 }
 
 /** Starts OpenRouter OAuth PKCE and returns the URL the user must open. */

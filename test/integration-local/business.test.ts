@@ -2,11 +2,12 @@ import { afterEach, beforeEach, expect, mock, spyOn, test } from "bun:test";
 // Use the deployment's existing compatibility shim; no OAuth behavior is mocked.
 mock.module("cloudflare:workers", () => ({ WorkerEntrypoint: class WorkerEntrypoint {} }));
 import { readdirSync } from "node:fs";
-import { fixture, vector } from "./fixture";
+import { fixture, providerKey, vector } from "./fixture";
 import { deleteMeme, getUser } from "../../src/db";
 const { namespace, memeVectors, hashStage, embedStage } = await import("../../src/ingest/embed");
 const { hybridSearch, keywordSearch } = await import("../../src/search/hybrid");
-const { canUseAi, billingStatus, splitCost } = await import("../../src/billing");
+const { canUseAi, billingStatus } = await import("../../src/billing");
+const { recordSpend } = await import("../../src/spend");
 import { sign, signedMediaUrl, serveMedia } from "../../src/media";
 
 let f: Awaited<ReturnType<typeof fixture>>;
@@ -71,14 +72,17 @@ test("paid user without subscription can start AI in SELF_HOSTED without balance
   process.env.SELF_HOSTED = "true";
   expect(await canUseAi(f.env.DB, user)).toEqual({ ok: true });
   expect((await billingStatus(f.env, user)).active).toBe(true);
-  expect(await splitCost(f.env.DB, user, 0.25)).toEqual({ fromAllowance: 0, fromBalance: 0 });
+  await recordSpend(f.env, { userId: user.id, kind: "self-hosted" }, "model", "global", { cost: 0.25 });
+  expect(await f.env.DB.prepare("SELECT from_allowance, from_balance FROM transactions WHERE user_id=?").bind(user.id)
+    .first<{ from_allowance: number; from_balance: number }>())
+    .toEqual({ from_allowance: 0, from_balance: 0 });
 });
 
 test("real embedding stage links volume bytes, mock AI, spend ledger, vectors and queued continuation", async () => {
   process.env.SELF_HOSTED = "true";
   await f.meme("ingest", 101);
   await f.env.DB.prepare("UPDATE memes SET status='embedding', title=NULL WHERE id='ingest'").run();
-  Object.assign(f.env, { OPENROUTER_API_KEY: "acceptance-fake-key" });
+  await providerKey(f.env, "openrouter", "acceptance-fake-key");
   let embeddings = 0;
   network.mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
     if (String(input) !== "https://openrouter.ai/api/v1/embeddings") {

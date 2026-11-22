@@ -233,7 +233,7 @@ function buildServer(env: Env, user: User, scopes: string[]) {
       role: user.role,
       search_mode: user.search_mode,
       describe_tier: user.describe_tier,
-      own_openrouter_key: user.openrouter_key !== null,
+      own_openrouter_key: false, // BYOK disabled: user.openrouter_key !== null.
       billing: await billingStatus(env, user),
     }),
   );

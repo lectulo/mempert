@@ -95,7 +95,7 @@ describe("payments", () => {
 });
 
 describe("included spend and gate", () => {
-  it("free roles pass; paid users need a plan, then allowance, balance or own key", async () => {
+  it("free roles pass; paid users need a plan, then allowance or balance, not a legacy key", async () => {
     await e.DB.prepare("INSERT INTO users (id, role) VALUES (200, 'user')").run();
     expect(await canUseAi(e.DB, (await getUser(e.DB, 200))!)).toEqual({ ok: true });
     expect(await canUseAi(e.DB, await user(201))).toEqual({ ok: false, reason: "subscribe" });
@@ -103,7 +103,7 @@ describe("included spend and gate", () => {
     expect(await canUseAi(e.DB, await user(202, `${active}, allowance_until = ${now() + 10 * DAY}`))).toEqual({ ok: true });
     expect(await canUseAi(e.DB, await user(203, `${active}, plan_byok = 1`))).toEqual({ ok: false, reason: "credit" });
     expect(await canUseAi(e.DB, await user(204, `${active}, plan_byok = 1, balance = 0.2`))).toEqual({ ok: true });
-    expect(await canUseAi(e.DB, await user(205, `${active}, plan_byok = 1, openrouter_key = 'x'`))).toEqual({ ok: true });
+    expect(await canUseAi(e.DB, await user(205, `${active}, plan_byok = 1, openrouter_key = 'x'`))).toEqual({ ok: false, reason: "credit" });
   });
 
   it("takes shared-key costs from the allowance, then the balance; own-key costs are free", async () => {

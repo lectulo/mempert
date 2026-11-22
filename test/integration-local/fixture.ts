@@ -6,6 +6,17 @@ import { createStorage } from "../../src/runtime/storage";
 import { createVectors } from "../../src/runtime/vectors";
 import type { Env } from "../../src/env";
 import type { Meme } from "../../src/db";
+import { saveAIConfig } from "../../src/aimodels";
+
+export async function providerKey(env: Env, id: "openrouter", key: string) {
+  const error = await saveAIConfig(env, { action: "provider", id, name: "OpenRouter", key });
+  if (error) throw new Error(error);
+}
+
+export async function createCompatibleProvider(env: Env, id: string, baseUrl: string, key: string) {
+  const error = await saveAIConfig(env, { action: "provider_create", id, name: "Fixture Compatible API", baseUrl, key });
+  if (error) throw new Error(error);
+}
 
 // Existing test/batch.test.ts uses structural Env casts and SQL fixtures;
 // keep that pattern, but replace all data bindings with the real local stores.

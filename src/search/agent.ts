@@ -1,9 +1,9 @@
 import { cachedQueryEmbeddings } from "../cache";
-import { AGENT_INITIAL, AGENT_MAX_STEPS, AGENT_MAX_VIEWS, CHAT_LIMIT, MODELS } from "../config";
+import { AGENT_INITIAL, AGENT_MAX_STEPS, AGENT_MAX_VIEWS, CHAT_LIMIT } from "../config";
 import { loadMemes, type Meme } from "../db";
 import type { Env } from "../env";
 import { memeMedia, toDataUrl } from "../media";
-import { chat, type ChatMessage, type Part } from "../openrouter";
+import { requireAIRoute, routedChat, type ChatMessage, type Part } from "../openrouter";
 import { hybridSearch } from "./hybrid";
 
 const LIST_PAGE = 200;
@@ -79,6 +79,7 @@ const args = (s: string): any => {
 
 /** Advanced chat search: an LLM agent that can refine the search, list titles and look at images. */
 export async function agentSearch(env: Env, userId: number, query: string): Promise<Meme[]> {
+  const route = await requireAIRoute(env, "search_agent");
   const known = new Set<string>();
   const own = async (ids: string[]) => (await loadMemes(env.DB, ids)).filter((m) => m.user_id === userId);
   const find = async (texts: string[], limit: number) => {
@@ -105,9 +106,10 @@ export async function agentSearch(env: Env, userId: number, query: string): Prom
   let views = 0;
 
   for (let step = 0; step < AGENT_MAX_STEPS; step++) {
-    const msg = await chat(
+    const msg = await routedChat(
       env,
-      { model: MODELS.search, messages, tools: TOOLS, tool_choice: step === AGENT_MAX_STEPS - 1 ? "none" : "auto" },
+      route,
+      { messages, tools: TOOLS, tool_choice: step === AGENT_MAX_STEPS - 1 ? "none" : "auto" },
       { userId, kind: "agent_step" },
     );
     if (!msg.tool_calls?.length) return own(parseIds(msg.content ?? "", known));

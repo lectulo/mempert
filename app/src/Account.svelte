@@ -9,6 +9,7 @@
   import Billing from "./Billing.svelte";
   import Channels from "./Channels.svelte";
   import Connections from "./Connections.svelte";
+  import AdminAI from "./AdminAI.svelte";
 
   interface Props {
     me: Me;
@@ -203,6 +204,7 @@
             />
             <Channels />
             <Connections />
+            <!-- BYOK disabled.
             <Heading as="h3" size="sm">{s.keyTitle}</Heading>
             <Text tone="muted">{me.key ? s.keyOwn : s.keyShared}</Text>
             <Inline gap="sm" wrap>
@@ -215,6 +217,7 @@
                 >
               {/if}
             </Inline>
+            -->
             <Heading as="h3" size="sm">{s.exportTitle}</Heading>
             <Text tone="muted" size="sm">{s.exportHint} {s.exportRestoreHint}</Text>
             {#if exp?.status === "running"}
@@ -306,7 +309,8 @@
                 </ul>
               {/if}
             {/if}
-          {:else if current.id === "admin"}
+          {:else if current.id === "admin" && me.role === "admin"}
+            {#if open}<AdminAI onSaved={() => api.me().then(onMeChange, () => {})} />{/if}
             <Inline gap="sm" align="end" wrap>
               <TextField label={s.adminTarget} bind:value={target} size="sm" />
               <Select
@@ -356,7 +360,7 @@
             <Text>{s.aboutText}</Text>
             <Heading as="h3" size="sm">{s.aboutModels}</Heading>
             <dl class="grid">
-              {#each Object.entries(me.models) as [name, model] (name)}<dt>{name}</dt><dd><code>{model}</code></dd>{/each}
+              {#each Object.entries(me.models) as [name, model] (name)}<dt>{name === "embed" ? s.aboutEmbeddings : s.adminAiWorkloads[name as keyof typeof s.adminAiWorkloads] ?? name}</dt><dd><code>{model}</code></dd>{/each}
             </dl>
             {#if !tg}<Text tone="muted" size="sm">{me.username ? `@${me.username}` : me.id} · {me.role}</Text>{/if}
           {/if}

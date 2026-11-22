@@ -1,5 +1,5 @@
 import { cachedQueryEmbeddings } from "../cache";
-import { FAST_LLM_TIMEOUT_MS, MODELS } from "../config";
+import { FAST_LLM_TIMEOUT_MS } from "../config";
 import type { Env } from "../env";
 import { parseJson } from "../ingest/describe";
 import { chat } from "../openrouter";
@@ -20,8 +20,8 @@ const SCHEMA = {
 async function rewrite(env: Env, userId: number, query: string): Promise<string[]> {
   const msg = await chat(
     env,
+    "search_rewrite",
     {
-      model: MODELS.search,
       max_tokens: 200,
       provider: { sort: "latency" },
       reasoning: { enabled: false },

@@ -1,4 +1,4 @@
-import { applyPayment, langOfUser, paymentText, planUsd, type ProductKind } from "./billing";
+import { applyPayment, billingFailure, langOfUser, paymentText, planUsd, type ProductKind } from "./billing";
 import { botApi } from "./botapi";
 import { pushBalance } from "./billingbot";
 import { CRYPTO_INVOICES_PER_HOUR, CRYPTO_TOPUPS } from "./config";
@@ -84,7 +84,7 @@ export async function createBtcpayInvoice(env: Env, u: User, kind: ProductKind, 
   if ((recent ?? 0) >= CRYPTO_INVOICES_PER_HOUR) return null;
   await cancelUnpaid(env, u.id);
   const id = crypto.randomUUID();
-  const byok = u.openrouter_key !== null ? 1 : 0;
+  const byok = 0; // BYOK disabled: u.openrouter_key !== null ? 1 : 0.
   const price = network ? usdAmount - (1 + Math.floor(Math.random() * 9)) / 100 : usdAmount;
   const res = await btcpayApi(env, "", {
     method: "POST",
@@ -109,16 +109,22 @@ export const getInvoice = (db: D1Database, id: string) => db.prepare("SELECT * F
 
 /** Applies a paid invoice once; an overpayment goes to the balance. Tells the user. */
 export async function settleInvoice(env: Env, inv: CryptoInvoice, overUsd = 0) {
+  if (inv.status === "paid") return false; // Already-paid invoices are covered by the allowance-only migration.
   const base = { userId: inv.user_id, method: inv.provider, byok: !!inv.byok };
-  const { applied, user } = await applyPayment(env.DB, { ...base, kind: inv.kind, usd: inv.usd, chargeId: `${inv.provider}:${inv.id}` });
+  // Confirmed late settlements of old discounted invoices get standard access at the original price.
+  // The original charge ID also guards against redelivery after the grant but before the invoice status update.
+  const { applied, user } = await applyPayment(env.DB, {
+    ...base, kind: inv.kind, includeAllowance: inv.kind !== "topup", usd: inv.usd, chargeId: `${inv.provider}:${inv.id}`,
+  });
   if (!applied) return false;
   let u = user;
   if (overUsd > 0) u = (await applyPayment(env.DB, { ...base, kind: "topup", usd: overUsd, chargeId: `${inv.provider}:${inv.id}:over` })).user ?? u;
   await env.DB.prepare("UPDATE crypto_invoices SET status = 'paid', credited_usd = ?, paid_at = unixepoch() WHERE id = ?")
     .bind(inv.usd + overUsd, inv.id)
     .run();
-  await pushBalance(env, inv.user_id, true).catch(console.error);
-  if (u) await botApi(env.BOT_TOKEN).sendMessage(u.id, paymentText(langOfUser(u), inv.kind, u, inv.usd), { parse_mode: "HTML" }).catch(console.error);
+  await pushBalance(env, inv.user_id, true).catch(billingFailure("push balance"));
+  if (u) await botApi(env.BOT_TOKEN).sendMessage(u.id, paymentText(langOfUser(u), inv.kind, u, inv.usd), { parse_mode: "HTML" })
+    .catch(billingFailure("send BTCPay receipt"));
   return true;
 }
 
@@ -147,7 +153,7 @@ export async function handleBtcpay(req: Request, env: Env): Promise<Response> {
   if (!inv) return new Response("OK");
   if (event.type === "InvoiceExpired") await setStatus(env.DB, inv.id, "expired");
   else if (event.type === "InvoiceInvalid") await setStatus(env.DB, inv.id, "invalid");
-  else if (event.type === "InvoiceSettled") {
+  else if (event.type === "InvoiceSettled" && inv.status !== "paid") {
     const res = await btcpayApi(env, `/${encodeURIComponent(event.invoiceId)}`);
     const live = res.ok ? await res.json<{ status: string }>() : null;
     if (live?.status === "Settled") await settleInvoice(env, inv);

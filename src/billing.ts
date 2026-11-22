@@ -9,7 +9,7 @@ import { t, type Key, type Lang } from "./i18n";
 // Billing for the "paid" role: subscription (Stars or crypto), monthly included AI spend, USD balance.
 
 const DAY = 86400;
-const MONTH = 30 * DAY;
+export const ALLOWANCE_MONTH = 30 * DAY;
 const now = () => Math.floor(Date.now() / 1000);
 
 /** Bun deployment flag; an explicit Env also works in the legacy Worker runtime. */
@@ -21,9 +21,9 @@ export type ProductKind = PlanKind | "topup";
 export type Method = "stars" | "btcpay";
 
 export const isFree = (u: Pick<User, "role">) => u.role !== "paid";
-export const ownKey = (u: Pick<User, "openrouter_key">) => u.openrouter_key !== null;
+export const ownKey = (_u: Pick<User, "openrouter_key">) => false; // BYOK disabled: u.openrouter_key !== null.
 export const isActive = (u: Pick<User, "paid_until">, at = now()) => (u.paid_until ?? 0) > at;
-/** Whether the current plan time was bought at the full price, with included AI spend. */
+/** Whether the current plan time is covered by included AI spend. */
 export const hasAllowance = (u: Pick<User, "allowance_until">, at = now()) => (u.allowance_until ?? 0) > at;
 
 /** Stars for a USD price: at STAR_USD, rounded up to 10⭐ ($1 = 80⭐, $0.5 = 40⭐, $10 = 770⭐, $4 = 310⭐). */
@@ -35,7 +35,7 @@ export const planUsd = (kind: PlanKind, byok: boolean) => (byok ? PLANS[kind].by
 /** Start of the current 30-day allowance month. */
 export const monthStart = (u: Pick<User, "plan_started">, at = now()) => {
   const start = u.plan_started ?? at;
-  return start + Math.floor(Math.max(0, at - start) / MONTH) * MONTH;
+  return start + Math.floor(Math.max(0, at - start) / ALLOWANCE_MONTH) * ALLOWANCE_MONTH;
 };
 
 /** Included AI spend left this month (0 for own-key plans and inactive subscriptions). */
@@ -57,7 +57,7 @@ export async function billingStatus(env: Env, u: User) {
     byok: isActive(u) && !hasAllowance(u),
     ownKey: ownKey(u),
     paidUntil: u.paid_until,
-    subState: u.sub_state,
+    subState: u.sub_state && u.sub_state !== "active" && await legacyStarsSubscription(env.DB, u) ? null : u.sub_state,
     balance: u.balance,
     allowance: MONTHLY_ALLOWANCE,
     allowanceLeft: await allowanceLeft(env.DB, u),
@@ -80,22 +80,12 @@ export async function canUseAi(db: D1Database, u: User): Promise<Gate> {
   return { ok: false, reason: "credit" };
 }
 
-/**
- * How a shared-key AI cost of a paid user is covered: included spend first, then the balance.
- * Returns the parts and the balance-deduction statement for the caller's batch.
- */
-export async function splitCost(db: D1Database, u: User, cost: number) {
-  if (selfHosted()) return { fromAllowance: 0, fromBalance: 0 };
-  const fromAllowance = Math.min(cost, await allowanceLeft(db, u));
-  const fromBalance = cost - fromAllowance;
-  return { fromAllowance, fromBalance };
-}
-
 export interface PaymentInput {
   userId: number;
   method: Method;
   kind: ProductKind;
   byok: boolean;
+  includeAllowance?: boolean; // Honor a legacy discounted charge with standard access, without rewriting the purchase price.
   usd: number;
   stars?: number;
   chargeId: string;
@@ -105,35 +95,48 @@ export interface PaymentInput {
 
 /** Applies a payment once (by charge id): extends the plan or credits the balance. */
 export async function applyPayment(db: D1Database, p: PaymentInput): Promise<{ applied: boolean; user: User | null }> {
-  const inserted = await db
+  const insert = db
     .prepare(
       `INSERT INTO payments (user_id, method, kind, byok, stars, usd, charge_id, recurring) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(charge_id) DO NOTHING RETURNING id`,
     )
-    .bind(p.userId, p.method, p.kind, p.byok ? 1 : 0, p.stars ?? null, p.usd, p.chargeId, p.recurring ? 1 : 0)
-    .first();
-  if (!inserted) return { applied: false, user: null };
+    .bind(p.userId, p.method, p.kind, p.byok ? 1 : 0, p.stars ?? null, p.usd, p.chargeId, p.recurring ? 1 : 0);
 
   const at = now();
-  const user =
+  const noAllowance = (p.includeAllowance ?? !p.byok) ? 0 : 1;
+  const grant =
     p.kind === "topup"
-      ? await db.prepare("UPDATE users SET balance = balance + ? WHERE id = ? RETURNING *").bind(p.usd, p.userId).first<User>()
-      : await db
+      ? db.prepare(`UPDATE users SET balance = balance + ? WHERE id = ?
+          AND NOT EXISTS (SELECT 1 FROM payments WHERE charge_id = ?) RETURNING *`).bind(p.usd, p.userId, p.chargeId)
+      : db
           .prepare(
-            // SET expressions read the old row: a lapsed plan restarts its allowance months now.
+            // SET reads the old row: restart lapsed allowance months, and don't displace a tracked subscription with a legacy first charge.
             `UPDATE users SET
-               plan = ?, plan_byok = ?,
-               plan_started = CASE WHEN COALESCE(paid_until, 0) <= ? THEN ? ELSE plan_started END,
-               paid_until = MAX(COALESCE(paid_until, 0), ?) + ?,
-               allowance_until = CASE WHEN ? THEN allowance_until ELSE MAX(COALESCE(allowance_until, 0), ?) + ? END,
-               sub_charge_id = COALESCE(?, sub_charge_id),
-               sub_state = CASE WHEN ? IS NOT NULL THEN 'active' ELSE sub_state END
-             WHERE id = ? RETURNING *`,
-          )
-          .bind(p.kind, p.byok ? 1 : 0, at, at, at, PLANS[p.kind].days * DAY, p.byok ? 1 : 0, at, PLANS[p.kind].days * DAY, p.subChargeId ?? null, p.subChargeId ?? null, p.userId)
-          .first<User>();
-  return { applied: true, user };
+               plan = ?1, plan_byok = ?2,
+               plan_started = CASE WHEN COALESCE(paid_until, 0) <= ?3 THEN ?3 ELSE plan_started END,
+               paid_until = MAX(COALESCE(paid_until, 0), ?3) + ?4,
+               allowance_until = CASE WHEN ?2 THEN allowance_until ELSE MAX(COALESCE(allowance_until, 0), ?3) + ?4 END,
+               sub_charge_id = CASE WHEN ?5 IS NOT NULL AND (?6 = 0 OR sub_charge_id IS NULL) THEN ?5 ELSE sub_charge_id END,
+               sub_state = CASE WHEN ?5 IS NOT NULL AND (?6 = 0 OR sub_charge_id IS NULL) THEN 'active' ELSE sub_state END
+             WHERE id = ?7 AND NOT EXISTS (SELECT 1 FROM payments WHERE charge_id = ?8) RETURNING *`,
+            )
+            .bind(p.kind, noAllowance, at, PLANS[p.kind].days * DAY, p.subChargeId ?? null, p.byok ? 1 : 0, p.userId, p.chargeId);
+  const cancellations: D1PreparedStatement[] = [];
+  if (p.method === "stars" && p.kind === "monthly" && (p.subChargeId || p.byok)) {
+    // Capture the old ID from the database (not the update's user snapshot) before replacing it.
+    cancellations.push(queueTrackedLegacyStars(db, p.userId));
+    if (p.byok && p.subChargeId) {
+      cancellations.push(queueLegacyStars(db, p.userId, p.subChargeId));
+    }
+  }
+  // Grant and record in one transaction so redelivery cannot double grant or leave a paid purchase ungranted.
+  const results = await db.batch([...cancellations, grant, insert]);
+  const [granted, inserted] = results.slice(-2);
+  return { applied: inserted.results.length > 0, user: (granted.results[0] as User | undefined) ?? null };
 }
+
+/** Some Telegram transport errors (including their nested causes) contain the bot-token URL. */
+export const billingFailure = (operation: string) => () => console.error(`billing: ${operation} failed`);
 
 /** Sends a billing notice once per (user, key). */
 export async function notifyOnce(env: Env, userId: number, key: string, text: string, buttons: InlineKeyboardButton[][] = []) {
@@ -143,7 +146,7 @@ export async function notifyOnce(env: Env, userId: number, key: string, text: st
   if (!fresh) return false;
   await botApi(env.BOT_TOKEN)
     .sendMessage(userId, text, { parse_mode: "HTML", reply_markup: { inline_keyboard: buttons } })
-    .catch(console.error);
+    .catch(billingFailure("send notice"));
   return true;
 }
 
@@ -156,32 +159,86 @@ export const subscribeButton = (lang: Lang): InlineKeyboardButton => ({ text: t(
 export const topupButton = (lang: Lang): InlineKeyboardButton => ({ text: t(lang, "bill_btn_topup"), callback_data: "bill:topup" });
 
 /** Notices after a spend: 80% / all of the month's included spend, low / empty balance. */
-export async function spendNotices(env: Env, before: User, fromAllowance: number, fromBalance: number) {
+export async function spendNotices(env: Env, after: User, fromAllowance: number, fromBalance: number) {
   if (selfHosted(env)) return;
-  const lang = langOfUser(before);
+  const lang = langOfUser(after);
   if (fromAllowance > 0) {
-    const left = await allowanceLeft(env.DB, before);
-    const start = monthStart(before);
+    const left = await allowanceLeft(env.DB, after);
+    const start = monthStart(after);
     if (left <= 0) {
-      await notifyOnce(env, before.id, `allow100:${start}`, t(lang, "bill_allow_done", { balance: money(before.balance) }), [[topupButton(lang)]]);
+      await notifyOnce(env, after.id, `allow100:${start}`, t(lang, "bill_allow_done", { balance: money(after.balance) }), [[topupButton(lang)]]);
     } else if (left <= MONTHLY_ALLOWANCE * 0.2) {
-      await notifyOnce(env, before.id, `allow80:${start}`, t(lang, "bill_allow_80", { left: money(left) }), [[topupButton(lang)]]);
+      await notifyOnce(env, after.id, `allow80:${start}`, t(lang, "bill_allow_80", { left: money(left) }), [[topupButton(lang)]]);
     }
   }
   if (fromBalance > 0) {
-    const balance = before.balance - fromBalance;
+    const { balance } = after;
     // Keyed by the last top-up, so the next top-up can warn again.
     const lastTopup =
-      (await env.DB.prepare("SELECT MAX(id) AS id FROM payments WHERE user_id = ? AND kind = 'topup'").bind(before.id).first<number>("id")) ?? 0;
-    if (balance <= 0) await notifyOnce(env, before.id, `empty:${lastTopup}`, t(lang, "bill_balance_empty"), [[topupButton(lang)]]);
+      (await env.DB.prepare("SELECT MAX(id) AS id FROM payments WHERE user_id = ? AND kind = 'topup'").bind(after.id).first<number>("id")) ?? 0;
+    if (balance <= 0) await notifyOnce(env, after.id, `empty:${lastTopup}`, t(lang, "bill_balance_empty"), [[topupButton(lang)]]);
     else if (balance < LOW_BALANCE) {
-      await notifyOnce(env, before.id, `low:${lastTopup}`, t(lang, "bill_balance_low", { balance: money(balance) }), [[topupButton(lang)]]);
+      await notifyOnce(env, after.id, `low:${lastTopup}`, t(lang, "bill_balance_low", { balance: money(balance) }), [[topupButton(lang)]]);
     }
   }
 }
 
-/** Cron: upcoming renewals and expiries, and ended subscriptions (each notice once per period). */
+/** Identify the actual Stars subscription, not the most recently paid plan. */
+export async function legacyStarsSubscription(db: D1Database, u: Pick<User, "id" | "sub_charge_id">) {
+  if (!u.sub_charge_id) return null;
+  return db.prepare(`SELECT charge_id FROM payments WHERE charge_id = ? AND user_id = ?
+    AND method = 'stars' AND kind = 'monthly' AND byok = 1`).bind(u.sub_charge_id, u.id).first<string>("charge_id");
+}
+
+export function queueLegacyStars(db: D1Database, userId: number, chargeId: string) {
+  return db.prepare(`INSERT INTO legacy_stars_cancellations (charge_id, user_id) VALUES (?, ?)
+    ON CONFLICT(charge_id) DO NOTHING`).bind(chargeId, userId);
+}
+
+function queueTrackedLegacyStars(db: D1Database, userId: number | null = null) {
+  return db.prepare(`INSERT INTO legacy_stars_cancellations (charge_id, user_id, canceled_at)
+    SELECT p.charge_id, u.id, CASE WHEN u.sub_state = 'canceled' THEN unixepoch() END
+    FROM users u JOIN payments p ON p.charge_id = u.sub_charge_id AND p.user_id = u.id
+    WHERE (?1 IS NULL OR u.id = ?1) AND u.sub_state IN ('active', 'failed', 'canceled')
+      AND p.method = 'stars' AND p.kind = 'monthly' AND p.byok = 1
+    ON CONFLICT(charge_id) DO NOTHING`).bind(userId);
+}
+
+/** Process persisted cancellation requests, including charges that are no longer the current subscription. */
+export async function retryLegacyStarsCancellations(db: D1Database, api: Api, userId: number | null = null) {
+  const { results } = await db.prepare(`SELECT user_id, charge_id FROM legacy_stars_cancellations
+    WHERE canceled_at IS NULL AND (?1 IS NULL OR user_id = ?1) AND COALESCE(lease_until, 0) <= unixepoch()
+    ORDER BY user_id, charge_id`)
+    .bind(userId).all<{ user_id: number; charge_id: string }>();
+  for (const { user_id, charge_id } of results) {
+    // Claim each charge before calling Telegram so overlapping payment and cron work don't both cancel it.
+    // A lease longer than the request deadline lets cron recover interrupted attempts.
+    const lease = await db.prepare(`UPDATE legacy_stars_cancellations SET lease_until = unixepoch() + 600
+      WHERE charge_id = ? AND canceled_at IS NULL AND COALESCE(lease_until, 0) <= unixepoch() RETURNING lease_until`)
+      .bind(charge_id).first<number>("lease_until");
+    if (lease === null) continue;
+    try {
+      // grammY's Node declaration uses the polyfill type, but accepts a native AbortSignal.
+      const signal = AbortSignal.timeout(120_000) as unknown as Parameters<Api["editUserStarSubscription"]>[3];
+      if (!await api.editUserStarSubscription(user_id, charge_id, true, signal)) {
+        throw new Error("Stars cancellation unconfirmed");
+      }
+      await db.batch([
+        db.prepare("UPDATE legacy_stars_cancellations SET canceled_at = unixepoch(), lease_until = NULL WHERE charge_id = ?").bind(charge_id),
+        db.prepare("UPDATE users SET sub_state = 'canceled' WHERE id = ? AND sub_charge_id = ?").bind(user_id, charge_id),
+      ]);
+    } catch {
+      billingFailure("cancel legacy Stars renewal")();
+      await db.prepare("UPDATE legacy_stars_cancellations SET lease_until = NULL WHERE charge_id = ? AND lease_until = ?")
+        .bind(charge_id, lease).run();
+    }
+  }
+}
+
+/** Cron: stop old discounted subscriptions, then notify about renewals and expiries. */
 export async function billingNotices(env: Env, at = now()) {
+  await queueTrackedLegacyStars(env.DB).run();
+  await retryLegacyStarsCancellations(env.DB, botApi(env.BOT_TOKEN));
   if (selfHosted(env)) return;
   const { results } = await env.DB.prepare(
     "SELECT * FROM users WHERE role = 'paid' AND paid_until IS NOT NULL AND paid_until BETWEEN ? AND ?",
@@ -197,7 +254,7 @@ export async function billingNotices(env: Env, at = now()) {
       await notifyOnce(env, u.id, `expired:${until}`, t(lang, "bill_expired"), [[subscribeButton(lang)]]);
     } else if (renews) {
       if (until - at <= 3 * DAY) {
-        const stars = starsFor(planUsd("monthly", !!u.plan_byok));
+        const stars = starsFor(planUsd("monthly", !!await legacyStarsSubscription(env.DB, u)));
         await notifyOnce(env, u.id, `renew3:${until}`, t(lang, "bill_renew_soon", { date: when, stars }));
       }
     } else if (until - at <= DAY) {
@@ -222,12 +279,15 @@ export interface StarsPayload {
   s: number;
 }
 
-/** Expected price in Stars for a payload, or null when it is not a valid product. */
+/** Expected price for a valid invoice, including historical prices for already collected payments. */
 export function expectedStars(p: StarsPayload): number | null {
+  if (p.b !== 0 && p.b !== 1) return null;
   if (p.k === "topup") return STAR_TOPUPS.includes(p.s) ? p.s : null;
   if (p.k !== "monthly" && p.k !== "yearly") return null;
   return starsFor(planUsd(p.k, !!p.b));
 }
+
+export const legacyStarsPlan = (p: StarsPayload) => p.b === 1 && (p.k === "monthly" || p.k === "yearly");
 
 /** Invoice link for a Stars product; the monthly plan is a 30-day auto-renewing subscription. */
 export async function starsInvoiceLink(api: Api, u: User, lang: Lang, kind: ProductKind, topupStars?: number) {
@@ -240,7 +300,7 @@ export async function starsInvoiceLink(api: Api, u: User, lang: Lang, kind: Prod
     kind === "topup" ? t(lang, "bill_desc_topup", { amount: money(payload.s * STAR_USD) }) : t(lang, byok ? "bill_desc_byok" : "bill_desc_plan");
   return api.createInvoiceLink(title, description, JSON.stringify(payload), "", "XTR", [{ label: title, amount: payload.s }], {
     ...(kind === "monthly" ? { subscription_period: 30 * DAY } : {}),
-  });
+  }).catch(() => { throw new Error("Telegram Stars invoice creation failed"); });
 }
 
 /** USD value of a Stars payment for the records and the balance. */

@@ -59,8 +59,7 @@
   // Partners who show their memes: the toolbar switches the library to theirs.
   const sharing = $derived(pairs.filter((p) => p.status === "active" && p.they_share && p.partner.id));
   let accountTab = $state("stats");
-  // Result of the OpenRouter connect redirect (?key=connected|failed), shown once (the URL sync drops it).
-  const keyLink = new URLSearchParams(location.search).get("key");
+  // BYOK disabled: const keyLink = new URLSearchParams(location.search).get("key");
   let notice = $state<{ tone: "success" | "danger"; text: string } | null>(null);
   let fileInput = $state<HTMLInputElement>();
   let dragging = $state(false);
@@ -376,7 +375,7 @@
     tg?.ready();
     tg?.expand();
     syncTheme();
-    if (keyLink) notice = keyLink === "connected" ? { tone: "success", text: s.keyConnected } : { tone: "danger", text: s.keyFailed };
+    // if (keyLink) notice = keyLink === "connected" ? { tone: "success", text: s.keyConnected } : { tone: "danger", text: s.keyFailed };
     const offRoute = onRoute(apply);
     api.me().then(
       (value) => {

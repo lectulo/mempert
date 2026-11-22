@@ -258,10 +258,10 @@ describe("R2 keys and presigned batch links", () => {
 });
 
 describe("blocked photos", () => {
-  it("sends a photo blocked in a batch to the next model instead of resubmitting it", async () => {
+  it("sends a photo blocked in a batch to the online route instead of resubmitting it", async () => {
     const { env: e, sent } = fakeEnv();
     await e.DB.prepare("INSERT INTO users (id, role) VALUES (31, 'user')").run();
-    await e.DB.prepare("INSERT INTO imports (id, user_id, status, batch_id, key_source) VALUES ('ib', 31, 'submitted', 'b9', 'global')").run();
+    await e.DB.prepare("INSERT INTO imports (id, user_id, status, batch_id, key_source, model) VALUES ('ib', 31, 'submitted', 'b9', 'global', 'google/gemini-4-argon')").run();
     await addMeme("k1", 31, "ib");
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) =>
       String(input).includes("api.telegram.org")
@@ -269,12 +269,12 @@ describe("blocked photos", () => {
         : json({ id: "b9", status: "completed", results: [{ custom_id: "k1", response: null, error: { type: "content_policy_violation_error", message: "Gemini blocked the request: SAFETY" } }] }),
     );
     await pollImports(e);
-    expect(sent).toEqual([{ type: "describe", memeId: "k1", gen: 0, from: 1 }]);
+    expect(sent).toEqual([{ type: "describe", memeId: "k1", gen: 0, from: 1, batchModel: "google/gemini-4-argon" }]);
     expect(await e.DB.prepare("SELECT import_id FROM memes WHERE id = 'k1'").first("import_id")).toBeNull();
     expect(await e.DB.prepare("SELECT status FROM imports WHERE id = 'ib'").first("status")).toBe("done");
   });
 
-  it("describes a blocked photo with the next model", async () => {
+  it("falls back within OpenRouter when the default online photo model is blocked", async () => {
     const { env: e } = fakeEnv();
     await e.DB.prepare("INSERT INTO users (id, role) VALUES (32, 'user')").run();
     await env.MEDIA.put("u/32/k2.jpg", "IMG", { httpMetadata: { contentType: "image/jpeg" } });
@@ -284,13 +284,12 @@ describe("blocked photos", () => {
       if (!String(input).endsWith("/chat/completions")) return json({ ok: true, result: { message_id: 1 } });
       const model = JSON.parse(String(init!.body)).model;
       models.push(model);
-      if (model === "google/gemini-4-argon") return json({ error: { message: "Gemini blocked the request: SAFETY" } }, 400);
-      return json({ choices: [{ message: { content: '{"title":"Dog","tags":["dog"]}' } }], usage: { cost: 0.001 } });
+      return json({ error: { message: "Gemini blocked the request: SAFETY" } }, 400);
     });
     const { describeStage } = await import("../src/ingest/describe");
-    await describeStage(e, "k2").catch(() => {}); // the finish step after it is not under test
-    expect(models).toEqual(["google/gemini-4-argon", "openai/gpt-6-luna"]);
-    expect(await e.DB.prepare("SELECT title FROM memes WHERE id = 'k2'").first("title")).toBe("Dog");
-    expect(await e.DB.prepare("SELECT model FROM transactions WHERE meme_id = 'k2'").first("model")).toBe("openai/gpt-6-luna");
+    await expect(describeStage(e, "k2")).rejects.toThrow("blocked by provider policy");
+    expect(models).toEqual(["google/gemini-4-argon", "openai/gpt-6-luna", "deepseek/deepseek-v4.1-flash-1017", "x-ai/grok-4.7"]);
+    expect(await e.DB.prepare("SELECT title FROM memes WHERE id = 'k2'").first("title")).toBeNull();
+    expect(await e.DB.prepare("SELECT model FROM transactions WHERE meme_id = 'k2'").first("model")).toBeNull();
   });
 });

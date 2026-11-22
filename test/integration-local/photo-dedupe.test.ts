@@ -1,13 +1,13 @@
 import { expect, mock, spyOn, test } from "bun:test";
 mock.module("cloudflare:workers", () => ({ WorkerEntrypoint: class WorkerEntrypoint {} }));
-import { fixture, vector } from "./fixture";
+import { fixture, providerKey, vector } from "./fixture";
 const { embedStage } = await import("../../src/ingest/embed");
 
 test("concurrent ordinary photo embeds claim identical bytes only once", async () => {
   const f = await fixture();
   const oldProxy = process.env.OUTBOUND_PROXY_URL;
   process.env.OUTBOUND_PROXY_URL = "";
-  f.env.OPENROUTER_API_KEY = "fake-embedding-key";
+  await providerKey(f.env, "openrouter", "fake-embedding-key");
   const network = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0]) => {
     expect(String(input)).toBe("https://openrouter.ai/api/v1/embeddings");
     return Response.json({ data: [{ index: 0, embedding: vector() }] });

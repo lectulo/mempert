@@ -1,4 +1,5 @@
 import { adminGrant, adminRevoke, listUsers } from "./admin";
+import { isAIConfigConflict, listAIConfig, saveAIConfig } from "./aimodels";
 import { batchProgress, cancelImport, finishImportFromApp, retryFailed, startImport } from "./batch";
 import { batchEnabled } from "./batchmode";
 import { t } from "./i18n";
@@ -11,7 +12,7 @@ import { analysisResult, analysisStatus, startAnalysis } from "./analysis";
 import { handleShare, revokeShares } from "./analysisshare";
 import { BACKFILL_WHERE, queueHashBackfill } from "./ingest/embed";
 import { queueRekey, recoverLostKeys, REKEY_WHERE } from "./rekey";
-import { oauthUrl, setUserKey } from "./userkey";
+// import { oauthUrl, setUserKey } from "./userkey"; // BYOK disabled.
 import { createZipImport, zipStatus } from "./zip";
 import { exportStatus, setExportStatusMessage, startExport } from "./export";
 import { accountSummary, CONFIRM, deleteAccount } from "./purge";
@@ -19,14 +20,14 @@ import { oauthApi } from "./oauth";
 import { connectE621, disconnectE621, e621Status, LISTS, setE621Lists, setE621Pools, syncE621, type Lists } from "./e621";
 import { E621Error } from "./ingest/sources/e621";
 import { createToken, deleteToken, listTokens } from "./tokens";
-import { billingStatus, canUseAi, ownKey, starsInvoiceLink, type ProductKind } from "./billing";
+import { billingStatus, canUseAi, legacyStarsSubscription, ownKey, starsInvoiceLink, type ProductKind } from "./billing";
 import { addChannelUrl, channelView, listChannels, removeChannel, updateChannel, type ChannelPatch } from "./channels";
 import { btcpayOn, createBtcpayInvoice, getInvoice, productUsd, usdtNetworks } from "./crypto";
 
 const json = (body: unknown, status = 200) => Response.json(body, { status, headers: { "Cache-Control": "no-store" } });
 
-/** App equivalents of the bot commands: /stats, /settings, /key, /batch*, /batch_zip, /export, /delete_all, /grant, /revoke, /users. */
-export async function handleAccount(req: Request, env: Env, user: User, parts: string[]): Promise<Response | null> {
+/** App equivalents of the bot commands: /stats, /settings, /batch*, /batch_zip, /export, /delete_all, /grant, /revoke, /users. */
+export async function handleAccount(req: Request, env: Env, user: User, parts: string[], interactive = false): Promise<Response | null> {
   const [resource, id = "", action = ""] = parts;
   const m = req.method;
   const lang = user.lang === "ru" ? "ru" : "en";
@@ -66,6 +67,7 @@ export async function handleAccount(req: Request, env: Env, user: User, parts: s
     return json({ ok: true });
   }
 
+  /* BYOK disabled. Leave stored keys intact for accepted batches.
   if (resource === "key") {
     if (m === "POST") return json({ url: await oauthUrl(env, user.id, "web") });
     if (m === "DELETE") {
@@ -73,6 +75,7 @@ export async function handleAccount(req: Request, env: Env, user: User, parts: s
       return json({ ok: true });
     }
   }
+  */
 
   // Check the OpenRouter batch feature before billing or side effects. ZIP import keeps its own billing gate.
   const newBatch = m === "POST" && resource === "batch" && (id === "start" || id === "retry");
@@ -211,6 +214,7 @@ export async function handleAccount(req: Request, env: Env, user: User, parts: s
       return json({ error: "method not available" }, 400);
     }
     if (id === "autorenew" && user.sub_charge_id) {
+      if (body.on && await legacyStarsSubscription(env.DB, user)) return json({ error: "legacy subscription; create a new subscription" }, 409);
       await botApi(env.BOT_TOKEN).editUserStarSubscription(user.id, user.sub_charge_id, !body.on);
       await env.DB.prepare("UPDATE users SET sub_state = ? WHERE id = ?").bind(body.on ? "active" : "canceled", user.id).run();
       return json({ ok: true });
@@ -219,6 +223,23 @@ export async function handleAccount(req: Request, env: Env, user: User, parts: s
 
   if (resource === "admin") {
     if (user.role !== "admin") return json({ error: "admins only" }, 403);
+    if (id === "ai") {
+      if (!interactive) return json({ error: "interactive login required" }, 403);
+      if (action || (m !== "GET" && m !== "POST")) return json({ error: "not found" }, 404);
+      try {
+        if (m === "GET") return json(await listAIConfig(env));
+        const origin = req.headers.get("Origin");
+        if (origin !== null && origin !== new URL(env.PUBLIC_URL).origin) return json({ error: "no access" }, 403);
+        if (req.headers.get("Content-Type")?.split(";")[0].trim().toLowerCase() !== "application/json") {
+          return json({ error: "JSON required" }, 415);
+        }
+        const error = await saveAIConfig(env, await req.json().catch(() => null));
+        return error ? json({ error }, isAIConfigConflict(error) ? 409 : 400) : json({ ok: true });
+      } catch {
+        // Do not echo or log exceptions from credential reads or writes.
+        return json({ error: "AI configuration unavailable" }, 500);
+      }
+    }
     if (m === "GET" && id === "users") return json(await listUsers(env));
     if (id === "migrate") {
       // Storage migration on demand: re-key all objects and back-fill all Telegram-only memes into R2.

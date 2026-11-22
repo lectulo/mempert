@@ -142,7 +142,7 @@ const schemas = {
       username: nullable("string"),
       role: { type: "string", enum: ["admin", "user", "paid"] },
       search_mode: { type: "string", enum: ["advanced", "fast"] },
-      key: { type: "boolean", description: "Own OpenRouter key connected." },
+      key: { type: "boolean", description: "Always false: personal OpenRouter keys are disabled." },
       models: { type: "object", additionalProperties: { type: "string" } },
       describe_tier: { type: "string", enum: ["max", "medium"] },
       batch_enabled: { type: "boolean", description: "Whether the instance submits new OpenRouter Batch requests. When false, ZIP imports remain available on the website and through the signed browser form from the bot's /batch_zip command, with ordinary processing and charges. Batches already accepted by OpenRouter still finish." },

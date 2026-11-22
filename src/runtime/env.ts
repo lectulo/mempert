@@ -10,12 +10,10 @@ import { LocalQueues } from "./queue";
 import worker from "../index";
 import { recoverBatchImports } from "../batch";
 import { validateOutboundProxyUrl } from "../outboundproxy";
-import { photoProvider } from "../photoprovider";
 import { batchEnabled } from "../batchmode";
 
 export async function createEnvironment(vars: Record<string, string | undefined> = process.env) {
   validateOutboundProxyUrl(vars.OUTBOUND_PROXY_URL);
-  photoProvider(vars);
   batchEnabled(vars);
   const rawPhotoWorkers = vars.PHOTO_WORKERS ?? "1";
   const photoWorkers = Number(rawPhotoWorkers);
@@ -39,7 +37,7 @@ export async function createEnvironment(vars: Record<string, string | undefined>
     ...localVars, TELEGRAM_MODE: telegramMode, WEBHOOK_SECRET: vars.WEBHOOK_SECRET ?? "", TG_CLIENT_SECRET: vars.TG_CLIENT_SECRET ?? "",
     PUBLIC_URL: publicUrl.origin, MEDIA_URL: publicUrl.origin, INTERNAL_URL: vars.INTERNAL_URL ?? "http://app:3000",
     THUMB_URL: vars.THUMB_URL ?? "http://thumb:8080", SELF_HOSTED: vars.SELF_HOSTED ?? "1",
-    OPENROUTER_API_KEY: vars.OPENROUTER_API_KEY ?? "", SCRAPER_URL: vars.SCRAPER_URL ?? "http://scraper:8080",
+    SCRAPER_URL: vars.SCRAPER_URL ?? "http://scraper:8080",
     SCRAPER_API_KEY: vars.SCRAPER_API_KEY ?? "", R2_BUCKET: "media",
     DB: db, OAUTH_KV: createKV(db), MEDIA: storage,
     VECTORS: createVectors(db), LIVE: new LiveHub(),

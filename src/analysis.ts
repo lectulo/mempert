@@ -1,5 +1,4 @@
 import { canUseAi } from "./billing";
-import { MODELS } from "./config";
 import { userAnalytics } from "./analytics";
 import { getUser } from "./db";
 import { userStats } from "./stats";
@@ -75,8 +74,8 @@ export async function labelClusters(env: Env, userId: number, clusters: Cluster[
     .join("\n\n");
   const msg = await chat(
     env,
+    "analysis_labels",
     {
-      model: MODELS.search,
       max_tokens: 60 * top.length + 200,
       reasoning: { enabled: false },
       messages: [

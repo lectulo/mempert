@@ -1,13 +1,11 @@
 import type { Composer } from "grammy";
 import type { Message } from "grammy/types";
 import type { Ctx } from "./bot";
-import { MODELS } from "./config";
-import { photoModel } from "./photoprovider";
 import { deleteMeme, type User } from "./db";
 import type { Env } from "./env";
 import { publicWebAppUrl } from "./telegramurl";
 import { EMOJI, esc, fileSize, t, usd, type Lang } from "./i18n";
-import { oauthUrl, setUserKey } from "./userkey";
+// import { oauthUrl, setUserKey } from "./userkey"; // BYOK disabled.
 import { allStats, userStats } from "./stats";
 import { startAnalysis } from "./analysis";
 import { batchProgress, cancelImport, collectingImport, countMemes, finishImport, retryFailed, startImport } from "./batch";
@@ -76,19 +74,23 @@ async function allStatsText(env: Env, lang: Lang) {
   return t(lang, "stats_all", { lines: lines.join("\n"), spend: `${usd(all.total)} (bot key ${usd(all.global)})` });
 }
 
+/* BYOK disabled.
 async function replyKey(ctx: Ctx, env: Env) {
   const connect = { text: t(ctx.lang, "key_connect"), url: await oauthUrl(env, ctx.user.id) };
   const has = ctx.user.openrouter_key !== null;
   const row = has ? [connect, { text: t(ctx.lang, "key_remove"), callback_data: "key:remove" }] : [connect];
   await ctx.reply(t(ctx.lang, has ? "key_set" : "key_none"), { ...html, reply_markup: { inline_keyboard: [row] } });
 }
+*/
 
 export function registerCommands<C extends Ctx>(bot: Composer<C>, env: Env) {
   bot.command("start", async (ctx) => {
+    /* BYOK disabled.
     if (ctx.match === "key_failed") {
       await ctx.reply(t(ctx.lang, "key_failed"), html);
       return replyKey(ctx, env);
     }
+    */
     if (ctx.match === "subscribe" || ctx.match === "topup") {
       const card = await (ctx.match === "subscribe" ? subscribeCard : topupCard)(env, ctx.api, ctx.user, ctx.lang);
       return ctx.reply(card.text, { ...html, reply_markup: card.reply_markup });
@@ -129,7 +131,7 @@ export function registerCommands<C extends Ctx>(bot: Composer<C>, env: Env) {
 
   bot.command("about", (ctx) =>
     ctx.reply(
-      t(ctx.lang, "about", { embed: MODELS.embed, image: esc(photoModel(env, ctx.user)), video: MODELS.describeVideo, search: MODELS.search, batch: batchEnabled(env) ? t(ctx.lang, "about_batch") : "" }),
+      t(ctx.lang, "about", { batch: batchEnabled(env) ? t(ctx.lang, "about_batch") : "" }),
       html,
     ),
   );
@@ -184,7 +186,7 @@ export function registerCommands<C extends Ctx>(bot: Composer<C>, env: Env) {
     ctx.reply(t(ctx.lang, "settings") + "\n\n" + t(ctx.lang, "tier_hint"), { ...html, reply_markup: settingsKeyboard(ctx.user, ctx.lang) }),
   );
 
-  bot.command("key", (ctx) => replyKey(ctx, env));
+  // bot.command("key", (ctx) => replyKey(ctx, env)); // BYOK disabled.
 
   // Telegram may offer cached provider commands. /batch_zip is an ordinary import and is not guarded here.
   bot.command(BATCH_COMMANDS, (ctx, next) => batchEnabled(env) ? next() : ctx.reply(t(ctx.lang, "batch_disabled"), html));
@@ -251,11 +253,13 @@ export function registerCommands<C extends Ctx>(bot: Composer<C>, env: Env) {
     await ctx.reply(n === null ? t(ctx.lang, "batch_off") : t(ctx.lang, "batch_cancelled", { n }), html);
   });
 
+  /* BYOK disabled. Leave stored keys intact for accepted batches.
   bot.callbackQuery("key:remove", async (ctx) => {
     await setUserKey(env, ctx.user.id, null);
     await ctx.answerCallbackQuery();
     await ctx.editMessageText(t(ctx.lang, "key_removed"), html).catch(() => {});
   });
+  */
 
   bot.callbackQuery(/^mode:(advanced|fast)$/, async (ctx) => {
     const mode = ctx.match[1] as User["search_mode"];

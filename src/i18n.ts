@@ -40,8 +40,7 @@ Forward a photo, video or GIF to save it. Send text to search: a caption fragmen
 
 /stats — your memes and AI spend
 /settings — chat search mode
-/delete — reply to a meme to remove it
-/key — use your own OpenRouter account{batch}
+/delete — reply to a meme to remove it{batch}
 /batch_zip — import a .zip with media or a Telegram chat export, or restore a memesave export
 /export — download all your data as a .zip
 /delete_all — delete your account and all data
@@ -61,12 +60,12 @@ Forward a photo, video or GIF to save it. Send text to search: a caption fragmen
 /users — list users
 /stats all — spend of all users`,
   about: `${E.help} <b>memesave</b>
-<b>Storage.</b> Each meme has a permanent copy in Cloudflare R2, with its text metadata and embeddings. Temporary files (search cache, .zip uploads, export archives) are deleted after max 7 days. Your own OpenRouter key is stored encrypted.
-<b>AI.</b> Each meme gets an embedding ({embed}) and a description: photos by {image} (quality in /settings), videos and GIFs by {video}. Single memes are checked with web search{batch}. When a provider refuses a photo, a fallback model describes it. Search uses {search}.
+<b>Storage.</b> The service stores your media, text metadata, and search embeddings.
+<b>AI.</b> The administrator selects the models used for descriptions, search, and analysis. Choose a photo model tier in /settings. The web app’s About tab lists the configured models.{batch}
 <b>Access.</b> Only you see your memes. An AI app connected with /mcp gets access only after your approval; you can revoke it in the app.
-Every AI request cost is saved to your /stats. /export downloads all your data, /delete_all deletes it.
+Recorded AI costs appear in /stats. /export downloads all your data, /delete_all deletes it.
 <b>Self-hosting.</b> Source code: <a href="https://github.com/cofob/memesave-bot">github.com/cofob/memesave-bot</a>. Support: @cofob.`,
-  about_batch: "; /batch does not use it",
+  about_batch: " /batch uses OpenRouter for bulk photo descriptions.",
   unknown_cmd: `${E.help} Unknown command. See /help`,
   unsupported: `${E.error} Only photos, videos and GIFs are supported.`,
   saving: `${E.indexing} Saved, indexing…`,
@@ -211,14 +210,14 @@ To confirm, send <code>/delete_all {confirm}</code>`,
   bill_btn_pay_stars: "Pay {stars}⭐",
   bill_btn_open_checkout: "Open payment page",
   bill_gate_subscribe: `${E.noAccess} memesave is a paid bot. Subscribe to save and search memes: from {price}/month, with {allowance} of AI spend included.`,
-  bill_gate_credit: `${E.error} Out of AI credit: this month's included spend is used up and your balance is empty. Top up, or connect your own OpenRouter account (/key).`,
+  bill_gate_credit: `${E.error} Out of AI credit: this month's included spend is used up and your balance is empty. Top up to continue.`,
   bill_subscribe: `${E.stats} <b>Subscription</b>
 Monthly: <b>{m_usd}</b> ({m_stars}⭐), renews automatically with Stars
 Yearly: <b>{y_usd}</b> ({y_stars}⭐) for 12 months
 {included}
-AI use above the included spend is paid from your balance at the actual API price, or by your own OpenRouter key (/key).
+AI use above the included spend is paid from your balance at the actual API price.
 {status}`,
-  bill_included_std: "Includes {allowance} of AI spend per month; it does not carry over. With your own OpenRouter key the price is lower.",
+  bill_included_std: "Includes {allowance} of AI spend per month; it does not carry over.",
   bill_included_byok: "Price with your own OpenRouter key: AI costs go to your key.",
   bill_status_free: "Your account is free: no subscription needed.",
   bill_status_active: "Active until <b>{date}</b>{renew}.",
@@ -255,7 +254,7 @@ Own OpenRouter key: {own}`,
   bill_allow_80: `${E.indexing} 80% of this month's included AI spend is used ({left} left).`,
   bill_allow_done: `${E.error} This month's included AI spend is used up. Further AI use is paid from your balance ({balance}).`,
   bill_balance_low: `${E.error} Your AI balance is low: {balance}.`,
-  bill_balance_empty: `${E.error} Your AI balance is empty. New saves and searches are paused until you top up or connect your own OpenRouter account.`,
+  bill_balance_empty: `${E.error} Your AI balance is empty. New saves and searches are paused until you top up.`,
   bill_renew_soon: `${E.indexing} Your subscription renews on {date} for {stars}⭐. Keep enough Stars in Telegram.`,
   bill_expiry_soon: `${E.indexing} Your subscription ends on {date}. Renew it to keep saving and searching.`,
   bill_expired: `${E.error} Your subscription has ended. Saving and search are paused; your memes are kept.`,
@@ -272,9 +271,8 @@ Own OpenRouter key: {own}`,
   porn_hidden: "🔞 Porn: hidden (tap to show)",
   blur_on: "🫥 Blur porn: on (tap to turn off)",
   blur_off: "🫥 Blur porn: off (tap to turn on)",
-  tier_hint: `${E.settings} <b>Photo descriptions via OpenRouter</b>
-<b>Max</b> — Gemini 4 Argon. <b>Medium</b> — GPT-6 Luna.
-See /about for the active photo model.`,
+  tier_hint: `${E.settings} <b>Photo description model tier</b>
+The administrator configures the models for <b>Max</b> and <b>Medium</b>. See the web app’s About tab for the configured models.`,
   cmd_subscribe: "Subscription",
   cmd_balance: "Balance and plan",
   cmd_paysupport: "Payment support",
@@ -623,7 +621,7 @@ To see or revoke connections, open the app: Account → Settings.`,
   w_album: "Album",
   w_settings_caption: "⚙️ <b>Settings</b>",
   w_set_search: "Chat search",
-  w_set_tier: "Photo descriptions via OpenRouter",
+  w_set_tier: "Photo description model tier",
   w_set_porn: "Porn",
   w_adv: "Advanced",
   w_fast: "Fast",
@@ -633,8 +631,8 @@ To see or revoke connections, open the app: Account → Settings.`,
   w_hidden: "Hide",
   w_h_adv: "AI agent refines the search and looks at images.",
   w_h_fast: "One quick pass, media only.",
-  w_h_max: "Gemini 4 Argon. See /about for the active photo model.",
-  w_h_medium: "GPT-6 Luna. See /about for the active photo model.",
+  w_h_max: "See the web app’s About tab for the model configured for Max.",
+  w_h_medium: "See the web app’s About tab for the model configured for Medium.",
   w_h_shown: "Porn is shown in search and the feed.",
   w_h_hidden: "Porn is hidden everywhere.",
   w_set_blur: "Blur porn",
@@ -701,8 +699,7 @@ const ru: Record<Key, string> = {
 
 /stats — ваши мемы и расходы на ИИ
 /settings — режим поиска в чате
-/delete — ответьте на мем, чтобы удалить
-/key — свой аккаунт OpenRouter{batch}
+/delete — ответьте на мем, чтобы удалить{batch}
 /batch_zip — импорт .zip с медиа или экспорта чата Telegram, восстановление экспорта memesave
 /export — скачать все ваши данные в .zip
 /delete_all — удалить аккаунт и все данные
@@ -722,12 +719,12 @@ const ru: Record<Key, string> = {
 /users — список пользователей
 /stats all — расходы всех пользователей`,
   about: `${E.help} <b>memesave</b>
-<b>Хранение.</b> У каждого мема есть постоянная копия в Cloudflare R2, вместе с текстовыми метаданными и эмбеддингами. Временные файлы (кэш поиска, загрузки .zip, архивы экспорта) удаляются максимум через 7 дней. Ваш собственный ключ OpenRouter хранится в зашифрованном виде.
-<b>ИИ.</b> Каждый мем получает эмбеддинг ({embed}) и описание: фото — {image} (качество в /settings), видео и GIF — {video}. Одиночные мемы проверяются веб-поиском{batch}. Если провайдер отказывается обрабатывать фото, его описывает резервная модель. Поиск использует {search}.
+<b>Хранение.</b> Сервис хранит медиа, текстовые метаданные и поисковые эмбеддинги.
+<b>ИИ.</b> Модели для описаний, поиска и анализа выбирает администратор. Уровень модели для фото можно выбрать в /settings. Список настроенных моделей есть во вкладке «О боте» веб-приложения.{batch}
 <b>Доступ.</b> Ваши мемы видите только вы. ИИ-приложение, подключённое через /mcp, получает доступ только после вашего разрешения; отозвать его можно в приложении.
-Стоимость каждого запроса к ИИ сохраняется в /stats. /export скачивает все ваши данные, /delete_all удаляет их.
+Учтённые расходы на ИИ видны в /stats. /export скачивает все ваши данные, /delete_all удаляет их.
 <b>Селфхостинг.</b> Исходный код: <a href="https://github.com/cofob/memesave-bot">github.com/cofob/memesave-bot</a>. Поддержка: @cofob.`,
-  about_batch: "; /batch его не использует",
+  about_batch: " /batch использует OpenRouter для пакетного описания фото.",
   unknown_cmd: `${E.help} Неизвестная команда. См. /help`,
   unsupported: `${E.error} Поддерживаются только фото, видео и GIF.`,
   saving: `${E.indexing} Сохранено, индексирую…`,
@@ -872,14 +869,14 @@ const ru: Record<Key, string> = {
   bill_btn_pay_stars: "Оплатить {stars}⭐",
   bill_btn_open_checkout: "Открыть страницу оплаты",
   bill_gate_subscribe: `${E.noAccess} memesave — платный бот. Оформите подписку, чтобы сохранять и искать мемы: от {price} в месяц, {allowance} расходов на ИИ включено.`,
-  bill_gate_credit: `${E.error} Закончился кредит на ИИ: включённые расходы этого месяца израсходованы, а баланс пуст. Пополните баланс или подключите свой аккаунт OpenRouter (/key).`,
+  bill_gate_credit: `${E.error} Закончился кредит на ИИ: включённые расходы этого месяца израсходованы, а баланс пуст. Пополните баланс, чтобы продолжить.`,
   bill_subscribe: `${E.stats} <b>Подписка</b>
 Месяц: <b>{m_usd}</b> ({m_stars}⭐), продлевается автоматически звёздами
 Год: <b>{y_usd}</b> ({y_stars}⭐) на 12 месяцев
 {included}
-Расходы на ИИ сверх включённых оплачиваются с баланса по фактической цене API или вашим ключом OpenRouter (/key).
+Расходы на ИИ сверх включённых оплачиваются с баланса по фактической цене API.
 {status}`,
-  bill_included_std: "Включено {allowance} расходов на ИИ в месяц, остаток не переносится. Со своим ключом OpenRouter цена ниже.",
+  bill_included_std: "Включено {allowance} расходов на ИИ в месяц, остаток не переносится.",
   bill_included_byok: "Цена со своим ключом OpenRouter: расходы на ИИ идут на ваш ключ.",
   bill_status_free: "Ваш аккаунт бесплатный: подписка не нужна.",
   bill_status_active: "Активна до <b>{date}</b>{renew}.",
@@ -916,7 +913,7 @@ const ru: Record<Key, string> = {
   bill_allow_80: `${E.indexing} Израсходовано 80% включённых расходов на ИИ в этом месяце (осталось {left}).`,
   bill_allow_done: `${E.error} Включённые расходы на ИИ в этом месяце закончились. Дальше ИИ оплачивается с баланса ({balance}).`,
   bill_balance_low: `${E.error} Баланс ИИ почти закончился: {balance}.`,
-  bill_balance_empty: `${E.error} Баланс ИИ пуст. Новые сохранения и поиск приостановлены, пока вы не пополните баланс или не подключите свой OpenRouter.`,
+  bill_balance_empty: `${E.error} Баланс ИИ пуст. Новые сохранения и поиск приостановлены до пополнения баланса.`,
   bill_renew_soon: `${E.indexing} Подписка продлится {date} за {stars}⭐. Держите достаточно звёзд в Telegram.`,
   bill_expiry_soon: `${E.indexing} Подписка заканчивается {date}. Продлите её, чтобы продолжать сохранять и искать.`,
   bill_expired: `${E.error} Подписка закончилась. Сохранение и поиск приостановлены; ваши мемы сохранены.`,
@@ -933,9 +930,8 @@ const ru: Record<Key, string> = {
   porn_hidden: "🔞 Порно: скрыто (нажмите, чтобы показать)",
   blur_on: "🫥 Размытие порно: вкл (нажмите, чтобы выключить)",
   blur_off: "🫥 Размытие порно: выкл (нажмите, чтобы включить)",
-  tier_hint: `${E.settings} <b>Описание фото через OpenRouter</b>
-<b>Максимум</b> — Gemini 4 Argon. <b>Среднее</b> — GPT-6 Luna.
-Текущая модель для фото указана в /about.`,
+  tier_hint: `${E.settings} <b>Уровень модели описания фото</b>
+Модели для уровней <b>Максимум</b> и <b>Среднее</b> настраивает администратор. Список моделей есть во вкладке «О боте» веб-приложения.`,
   cmd_subscribe: "Подписка",
   cmd_balance: "Баланс и тариф",
   cmd_paysupport: "Поддержка по оплате",
@@ -1282,7 +1278,7 @@ const ru: Record<Key, string> = {
   w_album: "Альбом",
   w_settings_caption: "⚙️ <b>Настройки</b>",
   w_set_search: "Поиск в чате",
-  w_set_tier: "Описание фото через OpenRouter",
+  w_set_tier: "Уровень модели описания фото",
   w_set_porn: "Порно",
   w_adv: "Расширенный",
   w_fast: "Быстрый",
@@ -1292,8 +1288,8 @@ const ru: Record<Key, string> = {
   w_hidden: "Скрывать",
   w_h_adv: "ИИ-агент уточняет поиск и смотрит картинки.",
   w_h_fast: "Один быстрый проход, только медиа.",
-  w_h_max: "Gemini 4 Argon. Текущая модель для фото — в /about.",
-  w_h_medium: "GPT-6 Luna. Текущая модель для фото — в /about.",
+  w_h_max: "Модель для максимального уровня указана во вкладке «О боте» веб-приложения.",
+  w_h_medium: "Модель для среднего уровня указана во вкладке «О боте» веб-приложения.",
   w_h_shown: "Порно видно в поиске и ленте.",
   w_h_hidden: "Порно скрыто везде.",
   w_set_blur: "Размытие порно",

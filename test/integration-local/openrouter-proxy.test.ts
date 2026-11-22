@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, expect, mock, spyOn, test } from "bun:test";
 mock.module("cloudflare:workers", () => ({ WorkerEntrypoint: class WorkerEntrypoint {} }));
 import { Api } from "grammy";
-import { fixture } from "./fixture";
-const { chat, embed, createBatch, getBatch, OpenRouterError } = await import("../../src/openrouter");
+import { fixture, providerKey } from "./fixture";
+const { chat, embed, createBatch, getBatch, openRouterKey, OpenRouterError } = await import("../../src/openrouter");
 const { oauthCallback, oauthUrl, decrypt, setUserKey } = await import("../../src/userkey");
 
 const userId = 91473;
@@ -24,7 +24,7 @@ beforeEach(async () => {
   // grammY captures its fetch on import; intercept notifications before transport.
   notice = spyOn(Api.prototype, "sendMessage").mockResolvedValue({ message_id: 1 } as never);
   f = await fixture();
-  f.env.OPENROUTER_API_KEY = "fake-global-key";
+  await providerKey(f.env, "openrouter", "fake-global-key");
   await f.env.DB.prepare("INSERT INTO users (id, role) VALUES (?, 'user')").bind(userId).run();
   await setUserKey(f.env, userId, null);
 });
@@ -37,7 +37,7 @@ afterEach(() => {
   else process.env.OUTBOUND_PROXY_URL = oldProxy;
 });
 
-function respond(handler: (url: string, init?: RequestInit) => Response) {
+function respond(handler: (url: string, init?: RequestInit) => Response | Promise<Response>) {
   network.mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
     calls.push({ url: String(input), init });
     return handler(String(input), init);
@@ -74,7 +74,7 @@ test("empty shared proxy preserves native fetch, headers, usage accounting and b
     if (url === `${base}/batches` || url === `${base}/batches/batch%2Fid`) return Response.json({ id: "batch/id", status: "in_progress" });
     throw new Error(`Unexpected mocked endpoint: ${url}`);
   });
-  expect((await chat(f.env, { model: "test-model", messages: [] }, spend, signal)).content).toBe("ok");
+  expect((await chat(f.env, "search_rewrite", { messages: [] }, spend, signal)).content).toBe("ok");
   expect(calls[0]!.init?.signal).toBe(signal);
   expect(JSON.parse(String(calls[0]!.init?.body)).user).toBe(String(userId));
   expect(headerValue(calls[0]!.init?.headers, "Authorization")).toBe("Bearer fake-global-key");
@@ -82,19 +82,24 @@ test("empty shared proxy preserves native fetch, headers, usage accounting and b
   await setUserKey(f.env, userId, "fake-user-key");
   expect(await embed(f.env, ["text"], "search_query", spend)).toEqual([[1], [2]]);
   const requests = [{ custom_id: "one", body: { model: "test-model" } }];
-  const created = await createBatch(f.env, userId, { model: "test-model" }, requests);
-  expect(created.source).toBe("user");
+  const created = await createBatch(await openRouterKey(f.env), { model: "test-model" }, requests);
+  expect(created.id).toBe("batch/id");
   expect(JSON.parse(String(calls[2]!.init?.body))).toEqual({ model: "test-model", requests });
   expect(Object.keys(JSON.parse(String(calls[2]!.init?.body))).at(-1)).toBe("requests");
   await getBatch(f.env, userId, "global", "batch/id");
+  await getBatch(f.env, userId, "user", "batch/id"); // previously submitted with BYOK
   expect(calls.map(c => headerValue(c.init?.headers, "Authorization"))).toEqual([
-    "Bearer fake-global-key", "Bearer fake-user-key", "Bearer fake-user-key", "Bearer fake-global-key",
+    "Bearer fake-global-key", "Bearer fake-global-key", "Bearer fake-global-key", "Bearer fake-global-key", "Bearer fake-user-key",
   ]);
+  expect(calls.every(c => c.init?.redirect === "error")).toBe(true);
   const rows = await f.env.DB.prepare("SELECT key_source, cost, prompt_tokens FROM transactions WHERE user_id = ? ORDER BY id").bind(userId).all();
   expect(rows.results).toEqual([
     { key_source: "global", cost: 0.01, prompt_tokens: 7 },
-    { key_source: "user", cost: 0.02, prompt_tokens: null },
+    { key_source: "global", cost: 0.02, prompt_tokens: null },
   ]);
+  await setUserKey(f.env, userId, null);
+  await expect(getBatch(f.env, userId, "user", "batch/id")).rejects.toThrow("OpenRouter batch credentials are unavailable");
+  expect(calls).toHaveLength(5);
 });
 
 test("empty proxy retains OAuth PKCE exchange and encrypted key persistence", async () => {
@@ -120,11 +125,57 @@ test("native mock responses retain transient retry and OpenRouter error semantic
   respond(() => ++attempts === 1
     ? Response.json({ error: { message: "try again", code: 429 } }, { status: 429 })
     : Response.json({ choices: [{ message: { role: "assistant", content: "retried" } }] }));
-  expect((await chat(f.env, { model: "test-model", messages: [] }, spend)).content).toBe("retried");
+  expect((await chat(f.env, "search_rewrite", { messages: [] }, spend)).content).toBe("retried");
   expect(attempts).toBe(2);
   respond(() => Response.json({ error: { message: "bad input" } }, { status: 400 }));
-  await expect(chat(f.env, { model: "test-model", messages: [] }, spend)).rejects.toBeInstanceOf(OpenRouterError);
+  await expect(chat(f.env, "search_rewrite", { messages: [] }, spend)).rejects.toBeInstanceOf(OpenRouterError);
   expect(calls).toHaveLength(3);
+});
+
+test("reported failed HTTP and chat attempts are accounted once, before retry", async () => {
+  const rows = async () => (await f.env.DB.prepare("SELECT cost, prompt_tokens FROM transactions WHERE user_id=? ORDER BY id").bind(userId).all()).results;
+  const success = { choices: [{ message: { role: "assistant", content: "retried" } }] };
+  for (const [attempt, fail] of [
+    Response.json({ error: { code: 429, usage: { cost: 0.9 } }, usage: { cost: 0.125, prompt_tokens: 12 } }, { status: 429 }),
+    Response.json({ choices: [{ error: { code: 502, usage: { cost: 0.125, prompt_tokens: 12 } } }] }),
+    Response.json({ choices: [], usage: { cost: 0.125, prompt_tokens: 12 } }),
+  ].entries()) {
+    let callsInRound = 0;
+    respond(async () => {
+      if (++callsInRound === 1) return fail;
+      expect(await rows()).toHaveLength(2 * attempt + 1);
+      expect((await rows()).at(-1)).toEqual({ cost: 0.125, prompt_tokens: 12 });
+      return Response.json({ ...success, usage: { cost: 0.25 } });
+    });
+    expect((await chat(f.env, "search_rewrite", { messages: [] }, spend)).content).toBe("retried");
+    expect(callsInRound).toBe(2);
+  }
+  expect(await rows()).toEqual(Array.from({ length: 3 }, () => [
+    { cost: 0.125, prompt_tokens: 12 }, { cost: 0.25, prompt_tokens: null },
+  ]).flat());
+  expect(await f.env.DB.prepare("SELECT total_cost FROM users WHERE id=?").bind(userId).first<number>("total_cost")).toBe(1.125);
+}, 10_000);
+
+test("terminal failures record known free usage and flag missing usage without leaking provider bodies", async () => {
+  const warn = spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    const secret = "private-provider-response-key";
+    respond(() => Response.json({ error: { message: secret, metadata: { raw: secret } }, usage: { cost: 0 } }, { status: 400 }));
+    for (const response of [null, new Response(secret, { status: 401 })]) {
+      if (response) respond(() => response);
+      try {
+        await chat(f.env, "search_rewrite", { messages: [] }, spend);
+        throw new Error("Expected the provider request to fail");
+      } catch (error) {
+        expect(error).toBeInstanceOf(OpenRouterError);
+        expect(`${error} ${(error as InstanceType<typeof OpenRouterError>).reason}`).not.toContain(secret);
+      }
+    }
+    expect(warn.mock.calls).toEqual([["AI usage missing", { kind: spend.kind }]]);
+    expect((await f.env.DB.prepare("SELECT cost FROM transactions WHERE user_id=?").bind(userId).all()).results).toEqual([{ cost: 0 }]);
+  } finally {
+    warn.mockRestore();
+  }
 });
 
 for (const endpoint of ["chat", "embeddings", "batch create", "batch status", "OAuth exchange"] as const) {
@@ -132,11 +183,11 @@ for (const endpoint of ["chat", "embeddings", "batch create", "batch status", "O
     const request = endpoint === "OAuth exchange" ? await callbackRequest() : undefined;
     // Invalid protocol guarantees a transport preflight failure, never DNS/socket IO.
     process.env.OUTBOUND_PROXY_URL = "ftp://proxy.invalid";
-    const run = () => {
+    const run = async () => {
       switch (endpoint) {
-        case "chat": return chat(f.env, { model: "test-model", messages: [] }, spend);
+        case "chat": return chat(f.env, "search_rewrite", { messages: [] }, spend);
         case "embeddings": return embed(f.env, ["text"], "search_query", spend);
-        case "batch create": return createBatch(f.env, userId, {}, []);
+        case "batch create": return createBatch(await openRouterKey(f.env), {}, []);
         case "batch status": return getBatch(f.env, userId, "global", "remote-id");
         case "OAuth exchange": return oauthCallback(request!, f.env);
       }

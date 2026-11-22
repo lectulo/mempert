@@ -3,6 +3,7 @@ import type { InlineKeyboardButton } from "grammy/types";
 import {
   allowanceLeft,
   applyPayment,
+  billingFailure,
   canUseAi,
   date,
   expectedStars,
@@ -10,10 +11,14 @@ import {
   isActive,
   isFree,
   langOfUser,
+  legacyStarsPlan,
+  legacyStarsSubscription,
   money,
   ownKey,
   paymentText,
   planUsd,
+  queueLegacyStars,
+  retryLegacyStarsCancellations,
   starsFor,
   starsInvoiceLink,
   starsPaymentUsd,
@@ -54,12 +59,11 @@ export async function subscribeCard(env: Env, api: Api, u: User, lang: Lang) {
   const text = t(lang, "bill_subscribe", { m_usd: money(m), m_stars: starsFor(m), y_usd: money(y), y_stars: starsFor(y), included, status: statusLine(u, lang) });
   if (isFree(u)) return { text, reply_markup: kb([]) };
   const [monthly, yearly] = await Promise.all([starsInvoiceLink(api, u, lang, "monthly"), starsInvoiceLink(api, u, lang, "yearly")]);
-  const renew: InlineKeyboardButton[] =
-    u.plan === "monthly" && u.sub_charge_id && isActive(u)
-      ? [u.sub_state === "active"
-          ? { text: t(lang, "bill_btn_cancel_renew"), callback_data: "bill:renew:off" }
-          : { text: t(lang, "bill_btn_resume_renew"), callback_data: "bill:renew:on" }]
-      : [];
+  const renew: InlineKeyboardButton[] = [];
+  if (u.plan === "monthly" && u.sub_charge_id && isActive(u)) {
+    if (u.sub_state === "active") renew.push({ text: t(lang, "bill_btn_cancel_renew"), callback_data: "bill:renew:off" });
+    else if (!await legacyStarsSubscription(env.DB, u)) renew.push({ text: t(lang, "bill_btn_resume_renew"), callback_data: "bill:renew:on" });
+  }
   return {
     text,
     // For the widget: prices and Stars invoice links (the first keyboard row).
@@ -143,7 +147,7 @@ export async function pushBalance(env: Env, userId: number, force = false) {
   // Spend updates come from parallel queue jobs: they do not wait on a 429 (see progressApi); payments do.
   const api = force ? botApi(env.BOT_TOKEN) : progressApi(env.BOT_TOKEN);
   await editWidget(api, u.id, u.balance_msg_id, await balanceState(env, u, langOfUser(u))).catch(async (e) => {
-    console.error("pushBalance", e);
+    billingFailure("update balance widget")();
     // The user deleted the message: stop updating it.
     if (String(e).includes("not found")) await env.DB.prepare("UPDATE users SET balance_msg_id = NULL WHERE id = ?").bind(u.id).run();
   });
@@ -183,8 +187,8 @@ async function cryptoCheckout(env: Env, ctx: Ctx, provider: "btc" | "usdt", kind
     if (!inv) return ctx.reply(t(ctx.lang, "bill_crypto_limit"), html);
     const text = network ? t(ctx.lang, "bill_usdt_checkout", { usd: money(inv.usd), network }) : t(ctx.lang, "bill_crypto_checkout", { usd: money(inv.usd) });
     return ctx.reply(text, { ...html, reply_markup: kb([[{ text: t(ctx.lang, "bill_btn_open_checkout"), url: inv.url }]]) });
-  } catch (e) {
-    console.error("crypto checkout", e);
+  } catch {
+    billingFailure("create crypto checkout")();
     return ctx.reply(t(ctx.lang, "bill_crypto_unavailable"), html);
   }
 }
@@ -232,9 +236,15 @@ export function registerBilling<C extends Ctx>(bot: Composer<C>, env: Env) {
   bot.callbackQuery(/^bill:renew:(on|off)$/, async (ctx) => {
     const on = ctx.match[1] === "on";
     if (!ctx.user.sub_charge_id) return ctx.answerCallbackQuery();
-    await ctx.api.editUserStarSubscription(ctx.user.id, ctx.user.sub_charge_id, !on);
+    if (on && await legacyStarsSubscription(env.DB, ctx.user)) return ctx.answerCallbackQuery(t(ctx.lang, "bill_precheckout_bad"));
+    try {
+      await ctx.api.editUserStarSubscription(ctx.user.id, ctx.user.sub_charge_id, !on);
+    } catch {
+      billingFailure("edit Stars auto-renew")();
+      return ctx.answerCallbackQuery(t(ctx.lang, "bill_precheckout_bad")).catch(billingFailure("answer Stars auto-renew"));
+    }
     const state = on ? "active" : "canceled";
-    await env.DB.prepare("UPDATE users SET sub_state = ? WHERE id = ?").bind(state, ctx.user.id).run();
+    await env.DB.prepare("UPDATE users SET sub_state = ? WHERE id = ? AND sub_charge_id = ?").bind(state, ctx.user.id, ctx.user.sub_charge_id).run();
     await ctx.answerCallbackQuery(t(ctx.lang, on ? "bill_renew_resumed" : "bill_renew_canceled", { date: date(ctx.user.paid_until ?? 0, ctx.lang) }).replace(/<[^>]+>/g, ""));
     const card = await subscribeCard(env, ctx.api, { ...ctx.user, sub_state: state }, ctx.lang);
     await ctx.editMessageText(card.text, { ...html, reply_markup: card.reply_markup }).catch(() => {});
@@ -254,38 +264,59 @@ export function registerPayments(bot: Bot<Ctx>, env: Env) {
   bot.on("pre_checkout_query", async (ctx) => {
     const q = ctx.preCheckoutQuery;
     const p = parsePayload(q.invoice_payload);
-    const ok = !!p && p.u === q.from.id && q.currency === "XTR" && expectedStars(p) === q.total_amount;
-    await ctx.answerPreCheckoutQuery(ok, ok ? undefined : { error_message: t(ctx.lang, "bill_precheckout_bad") });
+    const ok = !!p && p.u === q.from.id && q.currency === "XTR" && !legacyStarsPlan(p) && expectedStars(p) === q.total_amount;
+    await ctx.answerPreCheckoutQuery(ok, ok ? undefined : { error_message: t(ctx.lang, "bill_precheckout_bad") })
+      .catch(billingFailure("answer Stars checkout"));
   });
 
   bot.on("message:successful_payment", async (ctx) => {
     const sp = ctx.msg.successful_payment;
     const p = parsePayload(sp.invoice_payload);
-    if (!p || sp.currency !== "XTR") return;
+    if (!p || p.u !== ctx.from.id || sp.currency !== "XTR" || expectedStars(p) !== sp.total_amount) return;
+    // A recurring charge can arrive without a new checkout. Honor it without requiring a disabled key or charging the difference.
+    const legacy = legacyStarsPlan(p);
+    const recurring = !!sp.is_recurring && !sp.is_first_recurring;
+    const usd = starsPaymentUsd(p);
     const { applied, user } = await applyPayment(env.DB, {
       userId: ctx.from.id,
       method: "stars",
       kind: p.k,
       byok: !!p.b,
-      usd: starsPaymentUsd(p),
+      includeAllowance: legacy || undefined,
+      usd,
       stars: sp.total_amount,
       chargeId: sp.telegram_payment_charge_id,
-      recurring: !!sp.is_recurring && !sp.is_first_recurring,
-      subChargeId: sp.is_first_recurring ? sp.telegram_payment_charge_id : undefined,
+      recurring,
+      subChargeId: p.k === "monthly" && sp.is_first_recurring ? sp.telegram_payment_charge_id : undefined,
     });
-    if (applied) await pushBalance(env, ctx.from.id, true).catch(console.error);
-    if (applied && user) await ctx.reply(paymentText(ctx.lang, p.k, user, starsPaymentUsd(p), !!sp.is_recurring && !sp.is_first_recurring), html);
+    if (p.k === "monthly" && (legacy || sp.is_first_recurring)) {
+      await retryLegacyStarsCancellations(env.DB, ctx.api, ctx.from.id).catch(billingFailure("retry legacy Stars cancellation"));
+    }
+    if (applied) await pushBalance(env, ctx.from.id, true).catch(billingFailure("push balance"));
+    if (applied && user) await ctx.reply(paymentText(ctx.lang, p.k, user, usd, recurring), html).catch(billingFailure("send Stars receipt"));
   });
 
   bot.on("subscription", async (ctx) => {
-    const { user: from, state } = ctx.update.subscription!;
-    const u = await env.DB.prepare("UPDATE users SET sub_state = ? WHERE id = ? AND sub_state IS NOT ? RETURNING *")
-      .bind(state, from.id, state)
+    const { user: from, state, invoice_payload } = ctx.update.subscription!;
+    const p = parsePayload(invoice_payload);
+    const legacy = p && legacyStarsPlan(p);
+    const charge = legacy ? await legacyStarsSubscription(env.DB, ctx.user) : null;
+    if (legacy && !charge) return; // A stale event must not change a replacement subscription.
+    if (charge && state === "active") {
+      // Telegram's event has no charge ID; a delayed event must not reopen a completed cancellation.
+      await queueLegacyStars(env.DB, from.id, charge).run();
+      await retryLegacyStarsCancellations(env.DB, ctx.api, from.id).catch(billingFailure("retry legacy Stars cancellation"));
+      return;
+    }
+    const u = await env.DB.prepare(`UPDATE users SET sub_state = ? WHERE id = ? AND sub_state IS NOT ?
+      AND (? IS NULL OR sub_charge_id = ?) RETURNING *`)
+      .bind(state, from.id, state, charge, charge)
       .first<User>();
     if (!u) return;
-    await pushBalance(env, u.id, true).catch(console.error);
+    await pushBalance(env, u.id, true).catch(billingFailure("push balance"));
     const key = state === "failed" ? "bill_renew_failed" : state === "canceled" ? "bill_renew_canceled" : "bill_renew_resumed";
     const buttons = state === "failed" ? kb([[subscribeButton(ctx.lang)]]) : undefined;
-    await ctx.api.sendMessage(u.id, t(ctx.lang, key, { date: date(u.paid_until ?? 0, ctx.lang) }), { ...html, reply_markup: buttons });
+    await ctx.api.sendMessage(u.id, t(ctx.lang, key, { date: date(u.paid_until ?? 0, ctx.lang) }), { ...html, reply_markup: buttons })
+      .catch(billingFailure("send subscription notice"));
   });
 }

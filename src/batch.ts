@@ -1,7 +1,7 @@
 import { botApi } from "./botapi";
 import { batchEnabled } from "./batchmode";
 import { DESCRIBE_MODELS, MODELS } from "./config";
-import { getMeme, getUser, userLang, type Meme } from "./db";
+import { getMeme, userLang, type Meme } from "./db";
 import type { Env } from "./env";
 import { push } from "./live";
 import { esc, t, usd, type Key } from "./i18n";
@@ -9,9 +9,9 @@ import { describeRequest, isBlocked, parseAnswer, saveDescription, topTags, user
 import { hasExt, memeMedia, signedMediaUrl } from "./media";
 import { presignedR2Url } from "./presign";
 import { rekeyStage } from "./rekey";
-import { createBatch, errorNote, getBatch, type Batch, type KeySource } from "./openrouter";
+import { createBatch, errorNote, getBatch, openRouterKey, type Batch, type KeySource } from "./openrouter";
 import type { Job } from "./queue";
-import { splitCost } from "./billing";
+import { recordBatchSpend } from "./spend";
 
 const BATCH_MAX = 5000; // OpenRouter limit per batch
 const MEDIA_TTL = 5 * 86400; // longer than the 96 h Vertex window, shorter than the 7-day R2 lifecycle
@@ -184,10 +184,14 @@ export async function startImport(env: Env, userId: number): Promise<{ created: 
   return { created: false, count: await countMemes(db, (await collectingImport(db, userId))!) };
 }
 
-/** The batch-level error, or the first per-request error. */
+/** Recognize actionable failures without retaining provider error text or response bodies. */
 export function batchError(batch: Batch): string {
-  const first = (batch.results ?? []).map((r) => (r.error as { message?: string } | undefined)?.message).find(Boolean);
-  return batch.error?.message ?? first ?? `batch ${batch.status}`;
+  const error = batch.error ?? (batch.results ?? []).find((r) => r.error)?.error;
+  const detail = JSON.stringify(error) ?? "";
+  if (detail.includes("recognized image filename extension")) return "Batch image URLs require a recognized image filename extension";
+  if (error && isBlocked(detail)) return "Batch request blocked by provider policy";
+  if (error) return "Batch provider reported an error";
+  return ["completed", "failed", "expired", "cancelled", ...RUNNING].includes(batch.status) ? `batch ${batch.status}` : "batch status unknown";
 }
 
 export interface ImportProgress {
@@ -317,27 +321,38 @@ export async function submitImport(env: Env, importId: string) {
   await sendJobs(env, describeJobs(rest));
   const tags = await topTags(env.DB, imp.user_id);
   const tier = await userTier(env.DB, imp.user_id);
+  // The OpenRouter batch endpoint only supports specific models; online chat routes
+  // may select another provider or a model not offered on that endpoint.
+  const model = DESCRIBE_MODELS[tier];
   const requests = [];
   for (let i = 0; i < inBatch.length; i += 25) {
     requests.push(
       ...(await Promise.all(
         inBatch.slice(i, i + 25).map(async (m) => ({
           custom_id: m.id,
-          body: describeRequest(m, tags, [{ type: "image_url", image_url: { url: await batchImageUrl(env, m) } }], tier),
+          body: { ...describeRequest(m, tags, [{ type: "image_url", image_url: { url: await batchImageUrl(env, m) } }]), model },
         })),
       )),
     );
   }
   const claimed = await env.DB.prepare("UPDATE imports SET submission_started=1 WHERE id=? AND status='submitting' AND submission_started=0 RETURNING id").bind(importId).first();
   if (!claimed) return;
-  let created: Awaited<ReturnType<typeof createBatch>>;
+  // The claim blocks rotation before we resolve the key. Until the POST starts,
+  // a missing or unreadable key is safe to retry, not an unknown external outcome.
+  let key: string;
   try {
-    created = await createBatch(
-      env,
-      imp.user_id,
+    key = await openRouterKey(env);
+  } catch (error) {
+    await env.DB.prepare("UPDATE imports SET submission_started=0 WHERE id=? AND status='submitting'").bind(importId).run();
+    throw error;
+  }
+  let batch: Batch;
+  try {
+    batch = await createBatch(
+      key,
       {
         endpoint: "/v1/chat/completions",
-        model: DESCRIBE_MODELS[tier],
+        model,
         completion_window: "24h",
         callback_url: `${env.PUBLIC_URL.replace(/\/$/, "")}/batch/webhook`,
       },
@@ -348,12 +363,11 @@ export async function submitImport(env: Env, importId: string) {
     await failUnknownSubmission(env, imp);
     return;
   }
-  const { batch, source } = created;
   const attempt = imp.attempts + 1;
   await env.DB.prepare(
     "UPDATE imports SET status = 'submitted', submission_started=0, batch_id = ?, key_source = ?, attempts = ?, model = ?, updated_at = unixepoch() WHERE id = ?",
   )
-    .bind(batch.id, source, attempt, DESCRIBE_MODELS[tier], importId)
+    .bind(batch.id, "global", attempt, model, importId)
     .run();
   const retrying = attempt > 1;
   await progress(env, imp, retrying ? "batch_resubmitted" : "batch_submitted", { n: inBatch.length, attempt, max: MAX_ATTEMPTS });
@@ -424,11 +438,13 @@ async function persistDescribedContinuations(env: Env, importId: string) {
 async function pollImport(env: Env, imp: Import) {
   const db = env.DB;
   const enabled = batchEnabled(env);
-  const batch = await getBatch(env, imp.user_id, imp.key_source!, imp.batch_id!);
+  const batchId = imp.batch_id!;
+  const source = imp.key_source ?? "global";
+  const batch = await getBatch(env, imp.user_id, source, batchId);
   if (RUNNING.includes(batch.status)) return;
   const claimed = await db
-    .prepare("UPDATE imports SET status = 'processing', updated_at = unixepoch() WHERE id = ? AND status = 'submitted' RETURNING id")
-    .bind(imp.id)
+    .prepare("UPDATE imports SET status = 'processing', updated_at = unixepoch() WHERE id = ? AND status = 'submitted' AND batch_id = ? RETURNING id")
+    .bind(imp.id, batchId)
     .first();
   if (!claimed) return; // another poll took it
 
@@ -457,32 +473,18 @@ async function pollImport(env: Env, imp: Import) {
     }
     // Three statements per meme must never be split between transactions.
     for (let i = 0; i < updates.length; i += 90) await db.batch(updates.slice(i, i + 90));
-    // Receipt, transaction, balance and import cost commit together. No network
-    // inside the transaction, and retries cannot bill a completed batch twice.
-    const costOfBatch = batch.usage?.cost ?? 0;
-    const user = await getUser(db, imp.user_id);
-    const billed = user?.role === "paid" && imp.key_source === "global" && costOfBatch > 0
-      ? await splitCost(db, user, costOfBatch) : { fromAllowance: 0, fromBalance: 0 };
-    const unseen = "NOT EXISTS (SELECT 1 FROM batch_spend_receipts WHERE batch_id=?)";
-    await db.batch([
-      db.prepare(`INSERT INTO transactions (user_id,kind,model,key_source,cost,prompt_tokens,completion_tokens,from_allowance,from_balance)
-        SELECT ?, 'describe_batch', ?, ?, ?, ?, ?, ?, ? WHERE ${unseen}`)
-        .bind(imp.user_id, imp.model ?? MODELS.describeImage, imp.key_source!, costOfBatch, batch.usage?.prompt_tokens ?? null, batch.usage?.completion_tokens ?? null, billed.fromAllowance, billed.fromBalance, imp.batch_id),
-      db.prepare(`UPDATE users SET total_cost=total_cost+?, balance=balance-? WHERE id=? AND ${unseen}`).bind(costOfBatch, billed.fromBalance, imp.user_id, imp.batch_id),
-      db.prepare(`UPDATE imports SET cost=cost+? WHERE id=? AND ${unseen}`).bind(costOfBatch, imp.id, imp.batch_id),
-      db.prepare("INSERT OR IGNORE INTO batch_spend_receipts (batch_id,import_id) VALUES (?,?)").bind(imp.batch_id, imp.id),
-    ]);
-    // Blocked photos leave the import and go to the next describe model one by one.
+    await recordBatchSpend(env, imp.user_id, imp.model ?? MODELS.describeImage, source, batch.usage, { batchId, importId: imp.id });
+    // Blocked photos go online individually. Default routes omit the actual rejected model;
+    // explicit custom routes still use their configured provider and model.
     for (const m of enabled ? blocked : []) await db.batch([
-      continuation(db, { type: "describe", memeId: m.id, gen: m.gen, from: 1 }),
+      continuation(db, { type: "describe", memeId: m.id, gen: m.gen, from: 1, batchModel: imp.model ?? undefined }),
       db.prepare("UPDATE memes SET import_id=NULL WHERE id=? AND gen=?").bind(m.id, m.gen),
     ]);
     const totals = (await db.prepare("SELECT described, cost FROM imports WHERE id=?").bind(imp.id).first<Import>())!;
     const { described, cost } = totals;
     await flushBatchContinuations(env);
-    // Keep the batch status and the first errors to debug failures.
-    const errors = (batch.results ?? []).filter((r) => r.error).slice(0, 3);
-    const error = batch.status === "completed" && !errors.length ? null : JSON.stringify({ ...batch, results: errors }).slice(0, 2000);
+    const reason = batchError(batch);
+    const error = batch.status === "completed" && !batch.error && !(batch.results ?? []).some((r) => r.error) ? null : reason;
 
     if (!enabled) {
       const unresolved = retry.length + blocked.length;
@@ -510,7 +512,6 @@ async function pollImport(env: Env, imp: Import) {
     }
 
     const fallback = retry.length <= fallbackLimit(saved.length + retry.length);
-    const reason = batchError(batch);
     if (fallback) {
       for (const job of describeJobs(retry)) await continuation(db, job).run();
       await flushBatchContinuations(env);
@@ -525,8 +526,8 @@ async function pollImport(env: Env, imp: Import) {
       }
     }
     const status = (described || blocked.length) && fallback ? "done" : "failed";
-    await db.prepare("UPDATE imports SET status = ?, described = ?, cost = ?, error = ?, updated_at = unixepoch() WHERE id = ?")
-      .bind(status, described, cost, error, imp.id)
+    await db.prepare("UPDATE imports SET status = ?, described = ?, error = ?, updated_at = unixepoch() WHERE id = ?")
+      .bind(status, described, error, imp.id)
       .run();
     const key = !fallback ? "batch_stopped" : described ? "batch_done" : "batch_failed";
     await notify(env, imp, key, { ok: described, n: retry.length, cost: usd(cost), reason: esc(reason.slice(0, 300)) });

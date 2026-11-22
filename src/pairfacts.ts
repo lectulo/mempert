@@ -2,7 +2,6 @@
 // one call per language of the members; stored in result.facts[lang].
 import type { Analysis, Cluster } from "./analysis";
 import { canUseAi } from "./billing";
-import { MODELS } from "./config";
 import { getUser, userLang } from "./db";
 import type { Env } from "./env";
 import type { Lang } from "./i18n";
@@ -113,8 +112,8 @@ export async function pairFacts(env: Env, a: Analysis, r: PairResult) {
   for (const lang of langs) {
     const f = await chat(
       env,
+      "pair_facts",
       {
-        model: MODELS.search,
         max_tokens: 3000,
         reasoning: { enabled: false },
         messages: [

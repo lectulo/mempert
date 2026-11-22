@@ -2,7 +2,7 @@ import { env } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env } from "../src/env";
 import { createSession } from "../src/session";
-import { oauthCallback } from "../src/userkey";
+import { setUserKey } from "../src/userkey";
 import { handleApp } from "../src/webapp";
 
 const ctx = { waitUntil: () => {}, passThroughOnException: () => {} } as unknown as ExecutionContext;
@@ -17,7 +17,6 @@ beforeEach(() => {
   telegram.length = 0;
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
     const url = String(input);
-    if (url.includes("openrouter.ai/api/v1/auth/keys")) return Response.json({ key: "sk-or-web" });
     telegram.push(url.split("/").pop()!);
     return Response.json({ ok: true, result: { message_id: 9, username: "memebot" } });
   });
@@ -92,13 +91,13 @@ describe("account API (web parity with bot commands)", () => {
     expect((await call("POST", "memes/f1/retry")).status).toBe(409);
   });
 
-  it("connects OpenRouter from the web and returns to the web app", async () => {
+  it("does not manage personal OpenRouter keys from the web", async () => {
     const call = await as(87);
-    const { url } = (await call("POST", "key")).body;
-    const state = new URL(url).searchParams.get("state");
-    const res = await oauthCallback(new Request(`https://m.example/oauth/callback?code=c&state=${state}`), e);
-    expect(res.headers.get("Location")).toBe("https://m.example/?key=connected");
-    expect((await call("GET", "me")).body.key).toBe(true);
+    await setUserKey(e, 87, "sk-or-web");
+    expect((await call("POST", "key")).status).toBe(404);
+    expect((await call("DELETE", "key")).status).toBe(404);
+    expect((await call("GET", "me")).body.key).toBe(false);
+    expect(await e.DB.prepare("SELECT openrouter_key FROM users WHERE id = 87").first("openrouter_key")).toBeTruthy();
   });
 
   it("web photo uploads join an open batch", async () => {
