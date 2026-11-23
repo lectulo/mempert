@@ -33,6 +33,7 @@
   import UploadPanel from "./UploadPanel.svelte";
   import { addFiles, onUploadReady } from "./uploads.svelte";
   import { onLive, type LiveEvent } from "./live";
+  import { invalidateLiveStats } from "./live-stats";
   import { forget, loadIndex, localSearch, textIndex } from "./search.svelte";
   import { viewing } from "./viewing.svelte";
   import { onRoute, show } from "./route";
@@ -99,6 +100,7 @@
     serverItems = serverItems?.filter((m) => !gone.has(m.id)) ?? null;
     aiItems = aiItems?.filter((m) => !gone.has(m.id)) ?? null;
     ids.forEach(forget);
+    if (ids.length) invalidateLiveStats();
   }
 
   async function deletePicked() {

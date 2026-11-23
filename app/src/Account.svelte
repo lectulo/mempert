@@ -6,6 +6,7 @@
   import { confirm, openExternal, tg } from "./telegram";
   import { addFiles } from "./uploads.svelte";
   import { onLive } from "./live";
+  import { watchLiveStats } from "./live-stats";
   import Billing from "./Billing.svelte";
   import Channels from "./Channels.svelte";
   import Connections from "./Connections.svelte";
@@ -50,11 +51,17 @@
       return;
     }
     message = null;
-    if (tab === "stats") api.stats().then((v) => (stats = v), () => {});
     if (tab === "batch") api.batch().then((v) => (batch = v), () => {});
     if (tab === "admin") api.users().then((v) => (users = v), () => {});
     if (tab === "settings") api.exportStatus().then((v) => (exp = v), () => {});
     if (tab === "settings") api.accountSummary().then((v) => (summary = v), () => {});
+  });
+
+  $effect(() => {
+    stats = null;
+    if (!open) return;
+    const current = tabs.find((item) => item.id === tab) ?? tabs[0];
+    if (current.id === "stats") return watchLiveStats((value) => (stats = value));
   });
 
   // Export and batch status by server push (live.ts) while their tab is open.

@@ -506,7 +506,7 @@ function upload(file: File, meta: UploadMeta, onProgress: (fraction: number) => 
 
 export const api = {
   me: () => call<Me>("me"),
-  stats: () => call<Stats>("stats"),
+  stats: (signal?: AbortSignal) => call<Stats>("stats", { signal }),
   allStats: () => call<AllStats>("stats?all=1"),
   adminAnalytics: () => call<AdminAnalytics>("analytics?all=1"),
   analysis: () => call<{ current: AnalysisRun | null; ready: AnalysisRun | null }>("analysis"),

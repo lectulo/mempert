@@ -3,6 +3,7 @@ import type { Env } from "./env";
 import { allStats } from "./stats";
 
 const DAY = "date(created_at, 'unixepoch')";
+const CREATED_MONTH = "strftime('%Y-%m', created_at, 'unixepoch')";
 /** When the user saved a meme: the source like (e.g. TikTok), else when it was added. */
 export const SAVED = "COALESCE(saved_at, created_at)";
 export const MONTH = `strftime('%Y-%m', ${SAVED}, 'unixepoch')`;
@@ -152,7 +153,7 @@ export async function userAnalytics(env: Env, user: User) {
     q(`SELECT COUNT(*) AS ready, COALESCE(SUM(NOT EXISTS (SELECT 1 FROM meme_uses u WHERE u.meme_id = m.id)), 0) AS never,
        (SELECT MIN(created_at) FROM meme_uses WHERE user_id = ?1) AS since FROM memes m WHERE user_id = ?1 AND status = 'ready'`),
     // How memes were saved (bot, web, Mini App, API, MCP, zip); older ones from before the column are "unknown".
-    q(`SELECT strftime('%Y-%m', created_at, 'unixepoch') AS month, COALESCE(added_via, 'unknown') AS via, COUNT(*) AS n FROM memes WHERE user_id = ? GROUP BY month, via ORDER BY month`),
+    q(`SELECT ${CREATED_MONTH} AS month, COALESCE(added_via, 'unknown') AS via, COUNT(*) AS n FROM memes WHERE user_id = ? GROUP BY month, via ORDER BY month`),
     ...pornQueries(env.DB, user.id),
   ]);
   const [
@@ -195,7 +196,7 @@ export async function adminAnalytics(env: Env) {
     q("SELECT substr(error, 1, 80) AS k, COUNT(*) AS n FROM memes WHERE error IS NOT NULL GROUP BY k ORDER BY n DESC LIMIT 20"),
     q(`SELECT ${DAY} AS day, model, SUM(cost) AS cost FROM transactions GROUP BY day, model ORDER BY day`),
     q("SELECT key_source AS k, SUM(cost) AS cost FROM transactions GROUP BY k"),
-    q(`SELECT ${MONTH} AS month, method, SUM(usd) AS usd, COUNT(*) AS n FROM payments WHERE refunded = 0 GROUP BY month, method ORDER BY month`),
+    q(`SELECT ${CREATED_MONTH} AS month, method, SUM(usd) AS usd, COUNT(*) AS n FROM payments WHERE refunded = 0 GROUP BY month, method ORDER BY month`),
   ]);
   const [users, memes, statuses, errors, spend, keys, payments] = res.map(rows);
   return { users, memes, statuses, errors, spend, keys, payments, table: await allStats(env) };

@@ -5,6 +5,7 @@
   import { api, type AdminAnalytics, type AnalysisResult, type AnalysisRun, type Me, type PornSide, type SharedParts } from "./api";
   import Chart from "./Chart.svelte";
   import { onLive } from "./live";
+  import { watchLiveStats } from "./live-stats";
   import { autoHeight, bars, columns, hexAlpha, isDark, PALETTE, cumulative, dayRange, esc, heatmap, line, money, stacked, topGroups } from "./charts";
   import Embeddings from "./Embeddings.svelte";
   import ShareLink from "./ShareLink.svelte";
@@ -29,11 +30,14 @@
     { id: "mine", label: s.anMine },
     { id: "admin", label: s.anAdmin },
   ];
-  let admin = $state<AdminAnalytics | null>(null);
-  let error = $state(false);
+  const canViewAdmin = $derived(!shared && me?.role === "admin");
+  let adminStatus = $state.raw<{ status: "idle" | "loading" | "error" } | { status: "ready"; data: AdminAnalytics }>({ status: "idle" });
+  const admin = $derived(adminStatus.status === "ready" ? adminStatus.data : null);
+  let personalError = $state(false);
 
-  // Everything here comes from one daily analysis: the SQL stats snapshot and the embedding maps (the bot
-  // report shows the same one).
+  // The SQL stats and embedding maps come from the same analysis as the bot report.
+  // The current collection total is read separately and never changes the snapshot.
+  let currentTotal = $state<number | null>(null);
   let run = $state<AnalysisRun | null>(null);
   let ready = $state<AnalysisRun | null>(null);
   let result = $state.raw<AnalysisResult | null>(shared ?? null);
@@ -51,8 +55,9 @@
       // AI names added later keep the analysis id: reload the result when they appear.
       if (st.ready && (st.ready.id !== ready?.id || st.ready.labeled !== ready?.labeled)) result = await api.analysisResult();
       ready = st.ready;
+      personalError = false;
     } catch {
-      error = true;
+      personalError = true;
     } finally {
       loading = false;
     }
@@ -64,7 +69,7 @@
       run = await api.analysisStart(withLlm);
       await refresh();
     } catch {
-      error = true;
+      personalError = true;
     } finally {
       starting = false;
     }
@@ -80,8 +85,23 @@
   const percent = $derived(run && run.total ? Math.round((run.done / run.total) * 100) : undefined);
   const stage = $derived((s as unknown as Record<string, string>)[`anStage_${run?.stage ?? "queued"}`] ?? run?.stage ?? "");
   const date = (t: number) => new Date(t * 1000).toLocaleString();
+  const snapshotTime = $derived(result?.created_at ?? ready?.created_at);
   $effect(() => {
-    if (tab === "admin" && !admin) api.adminAnalytics().then((v) => (admin = v), () => (error = true));
+    currentTotal = null;
+    if (!shared && me && (!canViewAdmin || tab !== "admin")) return watchLiveStats((value) => (currentTotal = value.total));
+  });
+  async function loadAdmin() {
+    if (!canViewAdmin || tab !== "admin" || adminStatus.status === "loading" || adminStatus.status === "ready") return;
+    adminStatus = { status: "loading" };
+    try {
+      adminStatus = { status: "ready", data: await api.adminAnalytics() };
+    } catch {
+      adminStatus = { status: "error" };
+    }
+  }
+
+  $effect(() => {
+    if (canViewAdmin && tab === "admin") untrack(loadAdmin);
   });
 
   const counts = (rows: { k: string | null; n: number }[], name = (k: string) => k) => rows.map((r) => ({ name: name(r.k ?? "—"), value: r.n }));
@@ -284,9 +304,7 @@
     {#if onBack}<IconButton label={s.anBack} variant="ghost" size="sm" onclick={onBack}><ArrowLeft size={18} /></IconButton>{/if}
     <Heading as="h2" size="md" class="title">{shared ? s.anSharedTitle : s.analytics}</Heading>
   </div>
-  {#if error}<Alert tone="danger" title={s.error} />{/if}
-
-  {#if me?.role === "admin"}
+  {#if canViewAdmin}
     <Tabs {tabs} bind:value={tab} label={s.analytics}>
       {#snippet children(current)}
         <div class="panel">
@@ -302,22 +320,32 @@
 <!-- The user's stats: one page, sections in order, each with a short explanation. -->
 {#snippet mine()}
   <Stack gap="lg">
-    {#if !shared}{@render controls()}{/if}
+    {#if !shared}
+      {#if personalError}<Alert tone="danger" title={s.error} />{/if}
+      <div class="tiles">
+        {@render tile(s.anSavedNow, currentTotal?.toLocaleString() ?? "—")}
+      </div>
+      {@render controls()}
+    {/if}
     {#if result && !data && porn}{@render pornSection(porn)}{/if}
     {#if result && data && overview && tagCharts && spendCharts && sourceCharts}
       {@const u = data.uses}
       {@render section(s.anOverview, s.anIntro_overview)}
-      {#if stats}
-        <div class="tiles">
-          {@render tile(s.statMemes, stats.total.toLocaleString())}
+      {#if snapshotTime}<span class="hint">{fill(s.anSnapshotTime, { date: date(snapshotTime) })}</span>{/if}
+      <div class="tiles">
+        {#if stats}
+          {@render tile(s.anSnapshotSaved, stats.total.toLocaleString())}
+        {/if}
+        {@render tile(s.anSnapshotReady, result.count.toLocaleString())}
+        {#if stats}
           {@render tile(s.statStorage, fileSize(stats.bytes))}
           {#if !shared}
             {@render tile(s.statSpend, usd(stats.spend))}
             {@render tile(s.statSpend30, usd(stats.spend30))}
             {@render tile(s.statAvg, usd(stats.avg))}
           {/if}
-        </div>
-      {/if}
+        {/if}
+      </div>
       {#if data.timeline.length}
         <div class="grid">
           {@render card(s.anPerDay, overview.perDay)}
@@ -450,7 +478,7 @@
     {/if}
     {#if result && ready}
       <ShareLink porn={!!result.analytics?.porn && !me?.hide_porn} bind:link={ready.share} />
-      <span class="hint">{fill(s.anComputed, { date: date(ready.created_at), n: result.count, next: date(ready.fresh_until) })}</span>
+      <span class="hint">{fill(s.anNextRun, { next: date(ready.fresh_until) })}</span>
     {/if}
     {#if canStart}
       <section class="card">
@@ -479,9 +507,14 @@
 {/snippet}
 
 {#snippet allUsers()}
-  {#if !adminCharts || !admin}
+  {#if adminStatus.status === "error"}
+    <Stack gap="sm">
+      <Alert tone="danger" title={s.anAdminError} />
+      <div><Button size="sm" variant="secondary" onclick={loadAdmin}>{s.retry}</Button></div>
+    </Stack>
+  {:else if adminStatus.status === "loading"}
     <Spinner label="Loading" />
-  {:else}
+  {:else if adminCharts && admin}
     <Stack gap="md">
       <p class="hint">{s.anIntro_admin}</p>
       <div class="grid">
