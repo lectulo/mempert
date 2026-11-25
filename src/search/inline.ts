@@ -15,7 +15,7 @@ export async function cachedFastSearch(env: Env, userId: number, query: string):
   const key = tmpKey(`i/${userId}/${await sha256hex(normQuery(query))}`);
   const hit = await env.MEDIA.get(key);
   if (hit && Date.now() - hit.uploaded.getTime() < INLINE_CACHE_SECONDS * 1000) {
-    return loadMemes(env.DB, await hit.json<string[]>());
+    return loadMemes(env.DB, await hit.json<string[]>(), userId);
   }
   const memes = await fastSearch(env, userId, query, INLINE_LIMIT);
   await env.MEDIA.put(key, JSON.stringify(memes.map((m) => m.id)));
@@ -33,7 +33,7 @@ export async function handleInline(ctx: Ctx, env: Env) {
   const user = chat === "sender" || chat === "private" ? ctx.user : { ...ctx.user, hide_porn: 1 };
   const memes = visible(user, query.length < 2 ? await recentMemes(env.DB, ctx.user.id, INLINE_LIMIT) : await cachedFastSearch(env, ctx.user.id, query));
   const missing = needUpload(memes);
-  if (missing.length) await env.UPLOADS.send({ userId: ctx.user.id, memeIds: missing }).catch(console.warn);
+  if (missing.length) await env.UPLOADS.send({ userId: ctx.user.id, memeIds: missing }).catch(() => console.warn("inline upload enqueue failed"));
   const results = (await Promise.all(memes.map((m) => toInlineResult(env, m)))).filter((r) => r !== null);
   await ctx.answerInlineQuery(results, { cache_time: 30, is_personal: true });
 }

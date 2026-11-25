@@ -6,15 +6,15 @@ import { blursPorn, type Meme } from "../db";
 import { botApi } from "../botapi";
 import { telegramClientOptions } from "../telegramproxy";
 import type { Env } from "../env";
-import { publicWebAppUrl } from "../telegramurl";
+import { publicWebAppUrl, telegramMediaOrigin } from "../telegramurl";
 import { t, type Lang } from "../i18n";
 import { extractMedia } from "../ingest/receive";
-import { memeMedia, signedMediaUrl, variantOf } from "../media";
+import { inlineMediaUrls, memeMedia } from "../media";
 
 const URL_TTL = 86400;
 const EXT: Record<string, string> = { "image/png": "png", "image/webp": "webp", "image/gif": "gif", "video/webm": "webm", "video/quicktime": "mov" };
 
-/** Inline result: by Telegram file_id first; memes not yet in Telegram use signed R2 URLs (null when impossible). */
+/** Inline result: Telegram file_id first, then supported media on the public HTTPS origin. */
 export async function toInlineResult(env: Env, m: Meme): Promise<InlineQueryResult | null> {
   if (m.file_id) {
     if (m.kind === "photo") return { type: "photo", id: m.id, photo_file_id: m.file_id };
@@ -23,16 +23,18 @@ export async function toInlineResult(env: Env, m: Meme): Promise<InlineQueryResu
     }
     return m.mime === "video/mp4" ? { type: "mpeg4_gif", id: m.id, mpeg4_file_id: m.file_id } : { type: "gif", id: m.id, gif_file_id: m.file_id };
   }
-  const url = await signedMediaUrl(env, m, "file", URL_TTL);
-  const thumb = variantOf(m, "preview") === "preview" ? await signedMediaUrl(env, m, "preview", URL_TTL) : null;
-  if (m.kind === "photo") return { type: "photo", id: m.id, photo_url: url, thumbnail_url: thumb ?? url };
+  const origin = telegramMediaOrigin(env);
+  if (!origin) return null;
+  const media = await inlineMediaUrls(env, origin, m, URL_TTL).catch(() => null);
+  if (!media) return null;
+  const { url, thumbnail, mime } = media;
+  if (m.kind === "photo") return thumbnail ? { type: "photo", id: m.id, photo_url: url, thumbnail_url: thumbnail } : null;
   if (m.kind === "video") {
-    // Telegram needs a JPEG thumbnail for URL videos.
-    return thumb ? { type: "video", id: m.id, video_url: url, mime_type: "video/mp4", thumbnail_url: thumb, title: m.title ?? "Video" } : null;
+    return thumbnail ? { type: "video", id: m.id, video_url: url, mime_type: "video/mp4", thumbnail_url: thumbnail, title: m.title ?? "Video" } : null;
   }
-  return thumb
-    ? { type: "mpeg4_gif", id: m.id, mpeg4_url: url, thumbnail_url: thumb }
-    : { type: "mpeg4_gif", id: m.id, mpeg4_url: url, thumbnail_url: url, thumbnail_mime_type: "video/mp4" };
+  return mime === "image/gif"
+    ? { type: "gif", id: m.id, gif_url: url, thumbnail_url: thumbnail ?? url, thumbnail_mime_type: thumbnail ? "image/jpeg" : "image/gif" }
+    : { type: "mpeg4_gif", id: m.id, mpeg4_url: url, thumbnail_url: thumbnail ?? url, thumbnail_mime_type: thumbnail ? "image/jpeg" : "video/mp4" };
 }
 
 /** A video file id without Telegram's thumbnail: it was uploaded without the size and shows as a square. */

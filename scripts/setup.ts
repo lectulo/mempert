@@ -66,7 +66,7 @@ export async function setup(env: NodeJS.ProcessEnv, args: string[], request?: ty
     }
     if (args.includes("--dry-run")) log("Dry run: Telegram polling configuration is valid. No requests sent.");
     log(`Polling managed by app; webhook setup not required. On startup the app removes the webhook without dropping pending updates, synchronizes menus (${commands}) and starts long polling.`);
-    log("Website Telegram login still requires a public HTTPS origin and TG_CLIENT_SECRET; OpenRouter must be able to fetch signed media at PUBLIC_URL.");
+    log("Website Telegram login requires a public HTTPS PUBLIC_URL and TG_CLIENT_SECRET. External services fetch signed media at MEDIA_URL, or PUBLIC_URL if MEDIA_URL is unset.");
     return;
   }
   const config = webhookConfig(env, args);

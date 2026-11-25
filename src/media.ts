@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import type { Meme } from "./db";
 import type { Env } from "./env";
+import { INLINE_IMAGE_INPUT_MAX, InlineImageUnavailable, inlineJpeg } from "./inlinejpeg";
 import { telegramFetch } from "./telegramproxy";
 
 export interface Media {
@@ -112,6 +113,8 @@ export async function signedQuery(env: Env, scope: string, ttlSeconds: number) {
   return `?e=${exp}&s=${await sign(env, `${scope}|${exp}`)}`;
 }
 
+const mediaNotFound = (req: Request) => new Response(req.method === "HEAD" ? null : "Not found", { status: 404 });
+
 /**
  * Media behind a signed URL never changes, so it is cached until the URL expires: by the browser,
  * by Telegram and by browser caches. The server does not keep another in-memory media copy.
@@ -123,7 +126,7 @@ export async function cachedMedia(
   maxAge = Math.max(0, Number(new URL(req.url).searchParams.get("e")) - Math.floor(Date.now() / 1000)),
 ): Promise<Response> {
   const res = await load();
-  if (!res) return new Response("Not found", { status: 404 });
+  if (!res) return mediaNotFound(req);
   res.headers.set("Cache-Control", `public, max-age=${maxAge}, immutable`);
   res.headers.set("Accept-Ranges", "bytes");
   const range = req.headers.get("Range");
@@ -152,8 +155,8 @@ export async function verifyQuery(env: Env, scope: string, url: URL) {
 }
 
 /**
- * Public URL of a meme's file or preview for providers that only accept https media (OpenRouter Batch,
- * inline results). The path ends with a file extension: Vertex batch rejects image URLs without one.
+ * Public URL of an original file or preview (e.g. OpenRouter Batch).
+ * The path ends with a file extension: Vertex batch rejects image URLs without one.
  */
 export async function signedMediaUrl(env: Env, m: MediaMeme, variant: Variant, ttlSeconds: number, base = env.PUBLIC_URL) {
   const v = variantOf(m, variant);
@@ -161,7 +164,6 @@ export async function signedMediaUrl(env: Env, m: MediaMeme, variant: Variant, t
   return `${base.replace(/\/$/, "")}/media/${m.id}.${v}.${ext}${await signedQuery(env, `media|${m.id}|${v}`, ttlSeconds)}`;
 }
 
-/** GET /media/<memeId>.<file|preview>.<ext>?e=&s= — the meme's media from R2 (back-filled from Telegram when needed). */
 /** Streams local objects, including a bounded single byte range. Telegram-only files are backfilled once. */
 export async function mediaResponse(env: Env, m: MediaMeme, variant: Variant, req?: Request): Promise<Response | null> {
   const v = variantOf(m, variant);
@@ -174,30 +176,129 @@ export async function mediaResponse(env: Env, m: MediaMeme, variant: Variant, re
     info = key ? await env.MEDIA.head(key) : null;
   }
   if (!key || !info) return null;
-  const headers = new Headers({ "Content-Type": info.httpMetadata?.contentType ?? fallbackMime(m, v), "Accept-Ranges": "bytes", "Content-Length": String(info.size) });
+  return byteResponse(req, info.size, info.httpMetadata?.contentType ?? fallbackMime(m, v), async (range) => {
+    const object = await env.MEDIA.get(key, range ? {range} : undefined);
+    return object?.body ?? null;
+  });
+}
+
+async function byteResponse(req: Request | undefined, size: number, mime: string, body: (range?: {offset:number;length:number}) => Promise<ReadableStream | Uint8Array<ArrayBuffer> | null>) {
+  const headers = new Headers({ "Content-Type": mime, "Accept-Ranges": "bytes", "Content-Length": String(size) });
   let range: {offset:number;length:number} | undefined;
   const requested = req?.headers.get("Range");
   if (requested) {
     const match = /^bytes=(\d*)-(\d*)$/.exec(requested);
-    const start = match?.[1] ? Number(match[1]) : Math.max(0, info.size - Number(match?.[2]));
-    const end = match?.[1] && match[2] ? Math.min(info.size - 1, Number(match[2])) : info.size - 1;
-    if (!match || (!match[1] && !match[2]) || !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start > end || start >= info.size) {
-      headers.set("Content-Range", `bytes */${info.size}`); headers.delete("Content-Length");
+    const start = match?.[1] ? Number(match[1]) : Math.max(0, size - Number(match?.[2]));
+    const end = match?.[1] && match[2] ? Math.min(size - 1, Number(match[2])) : size - 1;
+    if (!match || (!match[1] && !match[2]) || !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start > end || start >= size) {
+      headers.set("Content-Range", `bytes */${size}`); headers.delete("Content-Length");
       return new Response(null, {status:416,headers});
     }
     range = {offset:start,length:end-start+1};
-    headers.set("Content-Range", `bytes ${start}-${end}/${info.size}`); headers.set("Content-Length", String(range.length));
+    headers.set("Content-Range", `bytes ${start}-${end}/${size}`); headers.set("Content-Length", String(range.length));
   }
   if (req?.method === "HEAD") return new Response(null, {status:range ? 206 : 200,headers});
-  const object = await env.MEDIA.get(key, range ? {range} : undefined);
-  return object && new Response(object.body, {status:range ? 206 : 200,headers});
+  const data = await body(range);
+  return data ? new Response(data, {status:range ? 206 : 200,headers}) : null;
 }
 
+const INLINE_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+const INLINE_MOTION_MAX = 20_000_000;
+type InlineVariant = "tg-photo" | "tg-thumb" | "tg-motion";
+type InlineSource = { object: R2Object; mime: string; revision: string };
+
+async function inlineSource(env: Env, m: Meme, variant: InlineVariant): Promise<InlineSource | null> {
+  const preview = variant === "tg-thumb" && m.kind !== "photo";
+  if ((variant === "tg-photo" && m.kind !== "photo") || (variant === "tg-motion" && m.kind === "photo")) return null;
+  const key = preview ? m.r2_preview : m.r2_file;
+  const object = key ? await env.MEDIA.head(key) : null;
+  if (!object || object.size <= 0) return null;
+  const mime = object.httpMetadata?.contentType ?? fallbackMime(m, preview ? "preview" : "file");
+  if (variant === "tg-motion") {
+    if (!(mime === "video/mp4" || (m.kind === "animation" && mime === "image/gif")) || object.size > INLINE_MOTION_MAX) return null;
+  } else if (!INLINE_IMAGE_TYPES.has(mime) || object.size > INLINE_IMAGE_INPUT_MAX) return null;
+  // Version the JPEG derivatives separately from originals and check their actual geometry in the converter.
+  const identity = JSON.stringify([m.user_id, m.id, m.kind, variant, key, object.version, mime, variant === "tg-motion" ? true : "jpeg-v1"]);
+  const revision = Buffer.from(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(identity))).toString("base64url");
+  return { object, mime, revision };
+}
+
+async function inlineUrl(env: Env, base: string, m: Meme, variant: InlineVariant, source: InlineSource, ttl: number) {
+  const ext = variant === "tg-motion" ? extOf(source.mime) : "jpg";
+  const path = `${m.id}.${variant}.${ext}`;
+  return `${base.replace(/\/$/, "")}/media/${path}${await signedQuery(env, `inline-media|${path}|${source.revision}`, ttl)}&r=${source.revision}`;
+}
+
+/** Telegram URLs are revision-bound and never backfill from Telegram or rewrite originals. */
+export async function inlineMediaUrls(env: Env, base: string, m: Meme, ttl: number) {
+  const variant = m.kind === "photo" ? "tg-photo" : "tg-motion";
+  const [source, thumb] = await Promise.all([inlineSource(env, m, variant), inlineSource(env, m, "tg-thumb")]);
+  if (!source || (!thumb && m.kind !== "animation")) return null;
+  const [url, thumbnail] = await Promise.all([
+    inlineUrl(env, base, m, variant, source, ttl),
+    thumb ? inlineUrl(env, base, m, "tg-thumb", thumb, ttl) : null,
+  ]);
+  return { url, thumbnail, mime: source.mime };
+}
+
+async function serveInlineMedia(req: Request, env: Env, url: URL, id: string, variant: InlineVariant, ext: string) {
+  const missing = () => {
+    const response = mediaNotFound(req);
+    response.headers.set("Cache-Control", "no-store");
+    return response;
+  };
+  if (req.method !== "GET" && req.method !== "HEAD") return missing();
+  const revision = url.searchParams.get("r") ?? "";
+  const exp = url.searchParams.get("e") ?? "";
+  const token = /^[\w-]{42}[AEIMQUYcgkosw048]$/; // canonical unpadded base64url for 32 bytes
+  if (!token.test(revision) || !token.test(url.searchParams.get("s") ?? "") || !/^[1-9]\d{0,14}$/.test(exp) ||
+      ["r", "s", "e"].some((name) => url.searchParams.getAll(name).length !== 1) ||
+      !(await verifyQuery(env, `inline-media|${id}.${variant}.${ext}|${revision}`, url))) return missing();
+  const current = async () => {
+    const meme = await env.DB.prepare("SELECT * FROM memes WHERE id = ?").bind(id).first<Meme>();
+    return meme ? inlineSource(env, meme, variant) : null;
+  };
+  try {
+    const source = await current();
+    if (!source || source.revision !== revision || ext !== (variant === "tg-motion" ? extOf(source.mime) : "jpg")) return missing();
+    let response: Response | null;
+    if (variant === "tg-motion") {
+      response = await byteResponse(req, source.object.size, source.mime, async (range) => {
+        const obj = await env.MEDIA.get(source.object.key, range ? { range } : undefined);
+        if (!obj || obj.version === source.object.version) return obj?.body ?? null;
+        await obj.body.cancel();
+        return null;
+      });
+    } else {
+      const jpeg = await inlineJpeg(env, revision, source.object, source.mime, variant === "tg-thumb");
+      if (!jpeg) return missing();
+      response = await byteResponse(req, jpeg.byteLength, "image/jpeg", async (range) =>
+        range ? jpeg.subarray(range.offset, range.offset + range.length) : jpeg);
+    }
+    if (!response) return missing();
+    // The row or source may have been detached while conversion or a storage read was in flight.
+    if ((await current())?.revision !== revision) {
+      await response.body?.cancel();
+      return missing();
+    }
+    // Server-side cache only; a proxy must not bypass the live row/revision check after deletion.
+    response.headers.set("Cache-Control", "private, no-store");
+    response.headers.set("X-Content-Type-Options", "nosniff");
+    return response;
+  } catch (error) {
+    if (error instanceof InlineImageUnavailable) return new Response(req.method === "HEAD" ? null : "Try again", { status: 503, headers: { "Retry-After": "1", "Cache-Control": "no-store" } });
+    return missing();
+  }
+}
+
+/** GET or HEAD /media/<memeId>.<file|preview>.<ext>?e=&s=. */
 export async function serveMedia(req: Request, env: Env, ctx: ExecutionContext) {
   const url = new URL(req.url);
+  const inline = /^\/media\/([\w-]{1,64})\.(tg-photo|tg-thumb|tg-motion)\.(jpg|gif|mp4)$/.exec(url.pathname);
+  if (inline) return serveInlineMedia(req, env, url, inline[1], inline[2] as InlineVariant, inline[3]);
   const [id = "", variant = ""] = (url.pathname.split("/")[2] ?? "").split(".");
   if ((variant !== "file" && variant !== "preview") || !(await verifyQuery(env, `media|${id}|${variant}`, url))) {
-    return new Response("Not found", { status: 404 });
+    return mediaNotFound(req);
   }
   return cachedMedia(req, ctx, async () => {
     const m = await env.DB.prepare("SELECT * FROM memes WHERE id = ?").bind(id).first<Meme>();

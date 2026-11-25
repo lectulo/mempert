@@ -22,7 +22,7 @@ export interface Env {
   ADMIN_ID: string;
   STORAGE_CHAT_ID?: string; // system channel for silent uploads (the bot is its admin)
   PUBLIC_URL: string; // base URL of this Worker, e.g. https://memereserve.cfb.wtf
-  MEDIA_URL?: string; // base URL for media links when R2 API keys are not set
+  MEDIA_URL?: string; // optional external HTTPS origin for signed /media/ links; defaults to PUBLIC_URL
   R2_ACCOUNT_ID?: string; // presigned R2 links for batch images (S3 API)
   R2_BUCKET: string;
   R2_ACCESS_KEY_ID?: string; // secret: R2 API token with read access to R2_BUCKET

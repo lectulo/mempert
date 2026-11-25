@@ -19,7 +19,6 @@ services:
       TELEGRAM_MODE: ${TELEGRAM_MODE:-polling}
       DB_PATH: /data/app.sqlite
       MEDIA_ROOT: /data/media
-      MEDIA_URL: ${PUBLIC_URL:?Set PUBLIC_URL in .env}
       THUMB_URL: http://thumb:8080
       SCRAPER_URL: http://scraper:8080
       COBALT_URL: http://cobalt:9000/

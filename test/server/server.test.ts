@@ -1,11 +1,68 @@
 import { test, expect } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { resolve } from "node:path";
+import { signedMediaUrl, sign } from "../../src/media";
 
 test("origin canonicalization cannot be bypassed with a scheme-relative pathname", async () => {
   const modulePath = "../../dist/server.js";
   const { publicRequest } = await import(modulePath);
   const req = publicRequest(new Request("http://internal:3000//evil.invalid/path?q=1"), "https://public.example");
   expect(req.url).toBe("https://public.example//evil.invalid/path?q=1");
+});
+
+test("the signed media route accepts HEAD with GET status and no body", async () => {
+  const root = mkdtempSync(resolve(tmpdir(), "mempert-media-head-"));
+  const modulePath = "../../dist/server.js";
+  const { startServer } = await import(modulePath) as typeof import("../../src/server");
+  const vars = {
+    PORT: "0", DB_PATH: ":memory:", MEDIA_ROOT: root, PUBLIC_URL: "http://localhost:3000",
+    MEDIA_URL: "https://media.example", TELEGRAM_MODE: "webhook", BOT_TOKEN: "1:fake", WEBHOOK_SECRET: "fake",
+    ENCRYPTION_KEY: "fake", TG_CLIENT_SECRET: "fake", WORKER_SECRET: "private", ADMIN_ID: "1",
+  };
+  const previous = Object.fromEntries(Object.keys(vars).map(key => [key, process.env[key]]));
+  Object.assign(process.env, vars);
+  let runtime: Awaited<ReturnType<typeof startServer>> | undefined;
+  try {
+    runtime = await startServer();
+    const { db, env, server, storage } = runtime;
+    db.sqlite.exec(`INSERT INTO users (id, role) VALUES (1, 'admin');
+      INSERT INTO memes (id,user_id,kind,file_id,file_unique_id,status,mime,r2_file)
+      VALUES ('head',1,'photo','','head','ready','image/jpeg','head.jpg');`);
+    await storage.put("head.jpg", new Uint8Array(9), { httpMetadata: { contentType: "image/jpeg" } });
+    const meme = { id: "head", kind: "photo", mime: "image/jpeg", r2_file: "head.jpg", r2_preview: null, file_id: "", preview_file_id: null } as const;
+    const url = new URL(await signedMediaUrl(env, meme, "file", 60, env.MEDIA_URL));
+    const expired = Math.floor(Date.now() / 1000) - 10;
+    const expiredQuery = `?e=${expired}&s=${await sign(env, `media|head|file|${expired}`)}`;
+    const missing = await signedMediaUrl(env, { ...meme, id: "missing" }, "file", 60, env.MEDIA_URL);
+    for (const [path, status, range] of [
+      [url.pathname + url.search, 200, undefined], [url.pathname + url.search, 206, "bytes=2-5"],
+      [url.pathname + url.search, 416, "bytes=20-30"], [new URL(missing).pathname + new URL(missing).search, 404, undefined],
+      [url.pathname, 404, undefined], [url.pathname + expiredQuery, 404, undefined],
+    ] as const) {
+      const headers = range ? { Range: range } : undefined;
+      const get = await fetch(new URL(path, server.url), { headers });
+      const head = await fetch(new URL(path, server.url), { method: "HEAD", headers });
+      expect(get.status).toBe(status);
+      expect(head.status).toBe(get.status);
+      for (const header of ["content-range", "accept-ranges", "cache-control"]) {
+        expect(head.headers.get(header)).toBe(get.headers.get(header));
+      }
+      if (status < 400) {
+        expect(head.headers.get("content-length")).toBe(get.headers.get("content-length"));
+        expect(head.headers.get("content-type")).toBe("image/jpeg");
+      }
+      expect(await head.text()).toBe("");
+      await get.arrayBuffer();
+    }
+  } finally {
+    await runtime?.stop();
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(root, { recursive: true });
+  }
 });
 
 test("built server boots offline, uses configured origin, and protects internal routes", async () => {

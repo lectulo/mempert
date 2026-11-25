@@ -1,5 +1,5 @@
 import { Bot, type Context } from "grammy";
-import { retryOn429 } from "./botapi";
+import { logTelegramFailure, retryOn429 } from "./botapi";
 import { telegramClientOptions } from "./telegramproxy";
 import { registerAdmin } from "./admin";
 import { registerE621 } from "./e621bot";
@@ -55,7 +55,7 @@ export function createBot(env: Env) {
     }
     ctx.user = res.user;
     if (res.created && res.user.role === "admin") {
-      await setCommandScope(env, ctx.api, res.user.id, "admin", ctx.lang).catch(console.error);
+      await setCommandScope(env, ctx.api, res.user.id, "admin", ctx.lang).catch((error: unknown) => logTelegramFailure("initial command scope failed", error));
     }
     await next();
   });
@@ -98,6 +98,6 @@ export function createBot(env: Env) {
   });
   pm.on("message", (ctx) => ctx.reply(t(ctx.lang, "unsupported"), html));
 
-  bot.catch((err) => console.error("bot error", err.error));
+  bot.catch((err) => logTelegramFailure("bot update failed", err));
   return bot;
 }

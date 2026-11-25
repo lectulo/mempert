@@ -26,7 +26,10 @@ describe("delivery from R2 and Telegram", () => {
     const meme = (await getMeme(e.DB, "s1"))!;
 
     const inline = await toInlineResult(e, meme);
-    expect(inline).toMatchObject({ type: "photo", photo_url: expect.stringMatching(/^https:\/\/m\.example\/media\/s1\.file\.png\?e=/) });
+    expect(inline).toMatchObject({ type: "photo",
+      photo_url: expect.stringMatching(/^https:\/\/m\.example\/media\/s1\.tg-photo\.jpg\?e=/),
+      thumbnail_url: expect.stringMatching(/^https:\/\/m\.example\/media\/s1\.tg-thumb\.jpg\?e=/),
+    });
 
     let uploaded = false;
     vi.spyOn(globalThis, "fetch").mockImplementation(async (_, init) => {

@@ -45,8 +45,8 @@ export async function fastSearch(env: Env, userId: number, query: string, limit:
     cachedQueryEmbeddings(env, [query], spend),
     rewrite(env, userId, query)
       .then(async (texts) => ({ texts, vectors: texts.length ? await cachedQueryEmbeddings(env, texts, spend) : [] }))
-      .catch((e) => {
-        console.warn("query rewrite failed", e);
+      .catch(() => {
+        console.warn("query rewrite failed");
         return { texts: [] as string[], vectors: [] as number[][] };
       }),
   ]);

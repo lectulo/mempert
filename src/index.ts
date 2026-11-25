@@ -1,8 +1,5 @@
 import OAuthProvider from "@cloudflare/workers-oauth-provider";
-import { botApi } from "./botapi";
-import { webhookCallback } from "grammy";
-import { createBot } from "./bot";
-import { syncCommands } from "./botcommands";
+import { handleBotWebhook } from "./botwebhook";
 import type { Env } from "./env";
 import { expireExports, handleExport } from "./export";
 import { expireAnalyses, handleAnalysis } from "./analysis";
@@ -24,8 +21,6 @@ import { handleShare } from "./share";
 import { handleUploads, queueUploads, type UploadJob } from "./search/tgupload";
 import { flushBatchContinuations, stopUnsubmittedImports } from "./batch";
 
-let handler: ((req: Request) => Promise<Response>) | undefined;
-let synced: Promise<unknown> | undefined;
 let oauth: OAuthProvider<Env> | undefined;
 
 /** All routes except the ones OAuthProvider serves itself (/mcp, /oauth/token, /oauth/register, /.well-known/*). */
@@ -37,7 +32,7 @@ const app = {
     // BYOK disabled. MCP OAuth still uses /oauth/authorize, /oauth/token, and /oauth/register.
     // if (req.method === "GET" && url.pathname === "/oauth/callback") return oauthCallback(req, env);
     if (url.pathname === "/oauth/authorize") return handleAuthorize(req, env);
-    if (req.method === "GET" && url.pathname.startsWith("/media/")) return serveMedia(req, env, ctx);
+    if ((req.method === "GET" || req.method === "HEAD") && url.pathname.startsWith("/media/")) return serveMedia(req, env, ctx);
     if (req.method === "GET" && /^\/[sd]\//.test(url.pathname)) return handleShare(req, env, ctx);
     if (url.pathname.startsWith("/upload/")) return handleUpload(req, env, ctx);
     if (url.pathname.startsWith("/app")) return (await handleApp(req, env, ctx)) ?? new Response("Not found", { status: 404 });
@@ -52,17 +47,7 @@ const app = {
       return new Response("OK");
     }
     if (req.method !== "POST" || url.pathname !== "/webhook") return new Response("Not found", { status: 404 });
-    if (env.TELEGRAM_MODE === "polling") return new Response("Webhook disabled", { status: 404 });
-    if (req.headers.get("X-Telegram-Bot-Api-Secret-Token") !== env.WEBHOOK_SECRET) {
-      return new Response("Unauthorized", { status: 401 });
-    }
-    synced ??= syncCommands(env, botApi(env.BOT_TOKEN)).catch((e) => {
-      synced = undefined;
-      console.error("command sync failed", e);
-    });
-    ctx.waitUntil(synced);
-    handler ??= webhookCallback(createBot(env), "cloudflare-mod", { timeoutMilliseconds: 55_000, onTimeout: "return" }) as unknown as NonNullable<typeof handler>;
-    return handler!(req);
+    return handleBotWebhook(req, env, ctx);
   },
 } satisfies ExportedHandler<Env>;
 

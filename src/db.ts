@@ -88,12 +88,12 @@ export const setStatus = (db: D1Database, id: string, status: Meme["status"], er
     .bind(status, error, id, ...(gen === undefined ? [] : [gen]))
     .run();
 
-/** Loads memes by id, keeping the order of `ids`. */
-export async function loadMemes(db: D1Database, ids: string[]): Promise<Meme[]> {
+/** Loads memes by id, keeping the order of `ids` and optionally requiring the current owner. */
+export async function loadMemes(db: D1Database, ids: string[], userId?: number): Promise<Meme[]> {
   if (!ids.length) return [];
   const { results } = await db
-    .prepare(`SELECT * FROM memes WHERE id IN (${ids.map(() => "?").join(",")})`)
-    .bind(...ids)
+    .prepare(`SELECT * FROM memes WHERE id IN (${ids.map(() => "?").join(",")})${userId === undefined ? "" : " AND user_id = ?"}`)
+    .bind(...ids, ...(userId === undefined ? [] : [userId]))
     .all<Meme>();
   const byId = new Map(results.map((m) => [m.id, m]));
   return ids.flatMap((id) => byId.get(id) ?? []);

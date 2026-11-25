@@ -1,4 +1,4 @@
-import { botApi } from "./botapi";
+import { botApi, logTelegramFailure } from "./botapi";
 import type { User as TgUser } from "grammy/types";
 import { resolveUser } from "./auth";
 import { ALBUM_FIRST, albumSizes, visible, deleteMeme, deleteMemes, getMeme, getUser, recordUse, storageFull, type Kind, type Meme, type User } from "./db";
@@ -616,7 +616,11 @@ async function handleApi(req: Request, env: Env, url: URL): Promise<Response> {
       allow_bot_chats: true,
       allow_group_chats: true,
       allow_channel_chats: true,
+    }).catch((error: unknown) => {
+      logTelegramFailure("savePreparedInlineMessage failed", error);
+      return null;
     });
+    if (!prepared) return json({ error: "telegram" }, 502);
     await recordUse(env.DB, user.id, meme.id, "share");
     return json({ id: prepared.id });
   }

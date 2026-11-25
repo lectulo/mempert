@@ -11,6 +11,7 @@ import worker from "../index";
 import { recoverBatchImports } from "../batch";
 import { validateOutboundProxyUrl } from "../outboundproxy";
 import { batchEnabled } from "../batchmode";
+import { telegramMediaOrigin } from "../telegramurl";
 
 export async function createEnvironment(vars: Record<string, string | undefined> = process.env) {
   validateOutboundProxyUrl(vars.OUTBOUND_PROXY_URL);
@@ -29,13 +30,15 @@ export async function createEnvironment(vars: Record<string, string | undefined>
   if (!/^https?:$/.test(publicUrl.protocol) || publicUrl.pathname !== "/" || publicUrl.username || publicUrl.password || publicUrl.search || publicUrl.hash) {
     throw new Error("PUBLIC_URL must be an HTTP(S) origin without a path");
   }
+  const mediaUrl = vars.MEDIA_URL?.trim() ? telegramMediaOrigin({ MEDIA_URL: vars.MEDIA_URL, PUBLIC_URL: publicUrl.origin }) : publicUrl.origin;
+  if (!mediaUrl) throw new Error("MEDIA_URL must be a public HTTPS origin without credentials, path, query or fragment");
   const db = await createDatabase(vars.DB_PATH ?? "/data/app.sqlite", vars.MIGRATIONS_DIR ?? "migrations");
   const storage = createStorage(vars.MEDIA_ROOT ?? "/data/media");
   await storage.cleanup();
   const localVars = Object.fromEntries(Object.entries(vars).filter(([key]) => !key.startsWith("R2_") && key !== "MEDIA_URL"));
   const env = {
     ...localVars, TELEGRAM_MODE: telegramMode, WEBHOOK_SECRET: vars.WEBHOOK_SECRET ?? "", TG_CLIENT_SECRET: vars.TG_CLIENT_SECRET ?? "",
-    PUBLIC_URL: publicUrl.origin, MEDIA_URL: publicUrl.origin, INTERNAL_URL: vars.INTERNAL_URL ?? "http://app:3000",
+    PUBLIC_URL: publicUrl.origin, MEDIA_URL: mediaUrl, INTERNAL_URL: vars.INTERNAL_URL ?? "http://app:3000",
     THUMB_URL: vars.THUMB_URL ?? "http://thumb:8080", SELF_HOSTED: vars.SELF_HOSTED ?? "1",
     SCRAPER_URL: vars.SCRAPER_URL ?? "http://scraper:8080",
     SCRAPER_API_KEY: vars.SCRAPER_API_KEY ?? "", R2_BUCKET: "media",

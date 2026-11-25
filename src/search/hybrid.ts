@@ -62,8 +62,8 @@ export async function regexSearch(env: Env, userId: number, pattern: string, lim
 }
 
 const safe = (p: Promise<string[]>) =>
-  p.catch((e) => {
-    console.warn("search source failed", e);
+  p.catch(() => {
+    console.warn("search source failed");
     return [];
   });
 
@@ -87,5 +87,6 @@ export async function hybridSearch(
       .bind(userId, ...chunk).all<{ id: string }>();
     for (const row of results) owned.add(row.id);
   }
-  return loadMemes(env.DB, ids.filter(id => owned.has(id)).slice(0, limit));
+  // Ownership can change between filtering the ranks and loading the rows.
+  return loadMemes(env.DB, ids.filter(id => owned.has(id)).slice(0, limit), userId);
 }

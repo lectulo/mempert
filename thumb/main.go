@@ -18,6 +18,7 @@ import (
 
 func main() {
 	http.HandleFunc("POST /clip", clip)
+	http.HandleFunc("POST /inline-image/{size}", inlineImage)
 	http.HandleFunc("POST /", thumb)
 	srv := &http.Server{Addr: ":8080"}
 	go func() {
